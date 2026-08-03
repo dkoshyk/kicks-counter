@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, deleteSession, addManualSession, formatDuration, type Session } from '../db';
+import { p2pSyncManager } from '../utils/p2pSync';
 import { Calendar, Clock, Trash2, Tag, ChevronRight, CheckCircle2, XCircle, Plus, X } from 'lucide-react';
 
 export const HistoryView: React.FC = () => {
@@ -41,6 +42,12 @@ export const HistoryView: React.FC = () => {
     e.stopPropagation();
     if (!id) return;
     if (window.confirm('Видалити запис цієї сесії з історії?')) {
+      try {
+        const sess = await db.sessions.get(id);
+        if (sess) {
+          p2pSyncManager.broadcastDeletedSession(sess.startTime);
+        }
+      } catch (_) {}
       await deleteSession(id);
     }
   };

@@ -1,5 +1,5 @@
 import Peer, { type DataConnection } from 'peerjs';
-import { db, addManualSession, type Session, type Kick } from '../db';
+import { db, addManualSession, deleteSession, type Session, type Kick } from '../db';
 
 export type Role = 'master' | 'slave' | 'none';
 
@@ -12,7 +12,7 @@ export interface LiveSessionState {
 }
 
 export interface P2PPayload {
-  type: 'PAIR_ACCEPT' | 'LIVE_SESSION_UPDATE' | 'SESSION_COMPLETED' | 'REQUEST_HISTORY' | 'HISTORY_RESPONSE' | 'DISCONNECT';
+  type: 'PAIR_ACCEPT' | 'LIVE_SESSION_UPDATE' | 'SESSION_COMPLETED' | 'SESSION_DELETED' | 'REQUEST_HISTORY' | 'HISTORY_RESPONSE' | 'DISCONNECT';
   senderRole: Role;
   liveState?: LiveSessionState;
   completedSession?: {
@@ -20,6 +20,7 @@ export interface P2PPayload {
     kicks: Kick[];
   };
   historySessions?: Session[];
+  deletedStartTime?: number;
 }
 
 class P2PSyncManager {
@@ -107,7 +108,6 @@ class P2PSyncManager {
    */
   public async initMaster(customRoomId?: string): Promise<string> {
     this.role = 'master';
-    // Generate clean short 6-character code without prefix
     this.roomId = customRoomId || Math.random().toString(36).substring(2, 8).toUpperCase();
     
     localStorage.setItem('poshtovhy_p2p_role', 'master');
@@ -251,6 +251,16 @@ class P2PSyncManager {
         if (this.role === 'slave' && payload.completedSession) {
           const { session } = payload.completedSession;
           try {
+            // Deduplication check: verify if session with same startTime already exists
+            const existingCount = await db.sessions
+              .where('startTime')
+              .between(session.startTime - 2000, session.startTime + 2000)
+              .count();
+
+            if (existingCount > 0) {
+              return; // Skip duplicate!
+            }
+
             const startDate = new Date(session.startTime);
             const durationMins = session.endTime
               ? Math.max(1, Math.round((session.endTime - session.startTime) / 60000))
@@ -274,6 +284,25 @@ class P2PSyncManager {
         }
         break;
 
+      case 'SESSION_DELETED':
+        if (this.role === 'slave' && payload.deletedStartTime) {
+          try {
+            const matchingSessions = await db.sessions
+              .where('startTime')
+              .between(payload.deletedStartTime - 2000, payload.deletedStartTime + 2000)
+              .toArray();
+
+            for (const s of matchingSessions) {
+              if (s.id) {
+                await deleteSession(s.id);
+              }
+            }
+          } catch (err) {
+            console.error('Failed to delete synced session:', err);
+          }
+        }
+        break;
+
       case 'REQUEST_HISTORY':
         if (this.role === 'master') {
           const completedSessions = await db.sessions
@@ -291,13 +320,24 @@ class P2PSyncManager {
 
       case 'HISTORY_RESPONSE':
         if (this.role === 'slave' && payload.historySessions) {
+          let addedCount = 0;
           for (const sess of payload.historySessions) {
-            const startDate = new Date(sess.startTime);
-            const durationMins = sess.endTime
-              ? Math.max(1, Math.round((sess.endTime - sess.startTime) / 60000))
-              : 20;
-
             try {
+              // Deduplication check: verify if session with same startTime already exists
+              const existingCount = await db.sessions
+                .where('startTime')
+                .between(sess.startTime - 2000, sess.startTime + 2000)
+                .count();
+
+              if (existingCount > 0) {
+                continue; // Skip duplicate!
+              }
+
+              const startDate = new Date(sess.startTime);
+              const durationMins = sess.endTime
+                ? Math.max(1, Math.round((sess.endTime - sess.startTime) / 60000))
+                : 20;
+
               await addManualSession({
                 dateStr: startDate.toISOString().slice(0, 10),
                 timeStr: startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }),
@@ -306,10 +346,11 @@ class P2PSyncManager {
                 targetKicks: sess.targetKicks,
                 note: `${sess.note ? sess.note + ' • ' : ''}Історія мами 🌸`
               });
+              addedCount++;
             } catch (_) {}
           }
-          if (this.onSessionReceivedCb) {
-            this.onSessionReceivedCb(`Синхронізовано ${payload.historySessions.length} сесій з історії мами!`);
+          if (this.onSessionReceivedCb && addedCount > 0) {
+            this.onSessionReceivedCb(`Синхронізовано ${addedCount} нових сесій з історії мами!`);
           }
         }
         break;
@@ -344,6 +385,19 @@ class P2PSyncManager {
       type: 'SESSION_COMPLETED',
       senderRole: 'master',
       completedSession: { session, kicks }
+    });
+  }
+
+  /**
+   * Broadcast deleted session (Mother to Father)
+   */
+  public broadcastDeletedSession(startTime: number) {
+    if (this.role !== 'master') return;
+
+    this.broadcast({
+      type: 'SESSION_DELETED',
+      senderRole: 'master',
+      deletedStartTime: startTime
     });
   }
 
