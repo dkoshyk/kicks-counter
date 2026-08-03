@@ -1,18 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import QRCode from 'qrcode';
 import { db, deleteSession, addManualSession, formatDuration, type Session } from '../db';
-import { Calendar, Clock, Trash2, Tag, ChevronRight, CheckCircle2, XCircle, Plus, X, QrCode, Copy, Download, Check, Share2 } from 'lucide-react';
+import { Calendar, Clock, Trash2, Tag, ChevronRight, CheckCircle2, XCircle, Plus, X } from 'lucide-react';
 
 export const HistoryView: React.FC = () => {
   const [filter, setFilter] = useState<'all' | 'completed' | 'cancelled'>('all');
   const [expandedSessionId, setExpandedSessionId] = useState<number | null>(null);
   const [showManualModal, setShowManualModal] = useState<boolean>(false);
-
-  // QR Modal state
-  const [selectedQrSession, setSelectedQrSession] = useState<Session | null>(null);
-  const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [copiedText, setCopiedText] = useState<boolean>(false);
 
   // Form state for manual session
   const getTodayISO = () => new Date().toISOString().slice(0, 10);
@@ -43,76 +37,12 @@ export const HistoryView: React.FC = () => {
       .sortBy('timestamp');
   }, [expandedSessionId]);
 
-  // Generate QR Code when a session is selected
-  useEffect(() => {
-    if (!selectedQrSession) {
-      setQrDataUrl('');
-      return;
-    }
-
-    const generateQR = async () => {
-      try {
-        const startDate = new Date(selectedQrSession.startTime);
-        const durationText = selectedQrSession.endTime
-          ? formatDuration(selectedQrSession.endTime - selectedQrSession.startTime)
-          : '-';
-
-        const sharePayload = {
-          app: 'Поштовхи PWA',
-          date: startDate.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' }),
-          time: startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }),
-          kickCount: selectedQrSession.kickCount,
-          targetKicks: selectedQrSession.targetKicks,
-          duration: durationText,
-          note: selectedQrSession.note || ''
-        };
-
-        const qrString = JSON.stringify(sharePayload);
-
-        const dataUrl = await QRCode.toDataURL(qrString, {
-          width: 320,
-          margin: 2,
-          color: {
-            dark: '#E11D48', // rose-600
-            light: '#FFFFFF'
-          }
-        });
-
-        setQrDataUrl(dataUrl);
-      } catch (err) {
-        console.error('Failed to generate QR Code:', err);
-      }
-    };
-
-    generateQR();
-  }, [selectedQrSession]);
-
   const handleDelete = async (e: React.MouseEvent, id?: number) => {
     e.stopPropagation();
     if (!id) return;
     if (window.confirm('Видалити запис цієї сесії з історії?')) {
       await deleteSession(id);
     }
-  };
-
-  const handleOpenQrModal = (e: React.MouseEvent, session: Session) => {
-    e.stopPropagation();
-    setSelectedQrSession(session);
-    setCopiedText(false);
-  };
-
-  const handleCopySummaryText = () => {
-    if (!selectedQrSession) return;
-    const startDate = new Date(selectedQrSession.startTime);
-    const durationText = selectedQrSession.endTime
-      ? formatDuration(selectedQrSession.endTime - selectedQrSession.startTime)
-      : '-';
-
-    const text = `🌸 Звіт сесії «Поштовхи»:\n• Дата: ${startDate.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' })}, ${startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })}\n• Поштовхи: ${selectedQrSession.kickCount} з ${selectedQrSession.targetKicks}\n• Тривалість: ${durationText}${selectedQrSession.note ? `\n• Нотатка: ${selectedQrSession.note}` : ''}`;
-
-    navigator.clipboard.writeText(text);
-    setCopiedText(true);
-    setTimeout(() => setCopiedText(false), 3000);
   };
 
   const handleSaveManualSession = async (e: React.FormEvent) => {
@@ -293,16 +223,6 @@ export const HistoryView: React.FC = () => {
                     </div>
 
                     <div className="flex items-center space-x-1.5">
-                      {/* QR Code Share Button */}
-                      <button
-                        type="button"
-                        onClick={(e) => handleOpenQrModal(e, session)}
-                        className="p-2 text-rose-500 hover:text-rose-600 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 rounded-xl transition-colors"
-                        title="Поділитися через QR-код"
-                      >
-                        <QrCode className="w-4 h-4" />
-                      </button>
-
                       <button
                         type="button"
                         onClick={(e) => handleDelete(e, session.id)}
@@ -363,86 +283,6 @@ export const HistoryView: React.FC = () => {
           </div>
         </div>
       ))}
-
-      {/* QR CODE MODAL */}
-      {selectedQrSession && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-          <div className="w-full max-w-sm bg-white dark:bg-[#1C1C1E] rounded-3xl p-6 shadow-2xl border border-gray-100 dark:border-zinc-800 text-center space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-gray-900 dark:text-white flex items-center">
-                <Share2 className="w-4 h-4 text-rose-500 mr-1.5" />
-                Поділитися сесією через QR
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSelectedQrSession(null)}
-                className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Generated QR Image Container */}
-            <div className="w-full bg-gradient-to-tr from-rose-50 to-pink-50 dark:from-zinc-800 dark:to-zinc-900 p-4 rounded-2xl border border-rose-100 dark:border-zinc-700 flex flex-col items-center justify-center space-y-2">
-              {qrDataUrl ? (
-                <img
-                  src={qrDataUrl}
-                  alt="QR Code сесії"
-                  className="w-56 h-56 rounded-xl shadow-md border-4 border-white dark:border-zinc-800"
-                />
-              ) : (
-                <div className="w-56 h-56 flex items-center justify-center text-xs text-gray-400">
-                  Генерація QR-коду...
-                </div>
-              )}
-              <p className="text-[11px] font-medium text-gray-500 dark:text-gray-400">
-                Наведіть камеру смартфона або лікаря для зчитування
-              </p>
-            </div>
-
-            {/* Session Info Summary */}
-            <div className="bg-gray-50 dark:bg-zinc-800/60 p-3 rounded-xl text-left text-xs space-y-1.5 border border-gray-100 dark:border-zinc-800">
-              <p className="font-bold text-gray-900 dark:text-white">
-                👣 {selectedQrSession.kickCount} з {selectedQrSession.targetKicks} поштовхів
-              </p>
-              <p className="text-gray-600 dark:text-gray-300">
-                🗓 {new Date(selectedQrSession.startTime).toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' })}, {new Date(selectedQrSession.startTime).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })}
-              </p>
-              <p className="text-gray-600 dark:text-gray-300">
-                ⏱ Тривалість: {selectedQrSession.endTime ? formatDuration(selectedQrSession.endTime - selectedQrSession.startTime) : '-'}
-              </p>
-              {selectedQrSession.note && (
-                <p className="text-rose-600 dark:text-rose-300 font-medium">
-                  📝 Нотатка: {selectedQrSession.note}
-                </p>
-              )}
-            </div>
-
-            {/* Actions: Copy text & Download QR */}
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handleCopySummaryText}
-                className="py-2.5 px-3 bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 text-gray-800 dark:text-gray-200 font-bold text-xs rounded-xl flex items-center justify-center space-x-1.5 transition-all"
-              >
-                {copiedText ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4 text-rose-500" />}
-                <span>{copiedText ? 'Скопійовано!' : 'Копіювати звіт'}</span>
-              </button>
-
-              {qrDataUrl && (
-                <a
-                  href={qrDataUrl}
-                  download={`kick_session_qr_${new Date(selectedQrSession.startTime).toISOString().slice(0, 10)}.png`}
-                  className="py-2.5 px-3 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl flex items-center justify-center space-x-1.5 shadow-md shadow-rose-500/20 transition-all"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Скачати QR</span>
-                </a>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* MANUAL ENTRY MODAL */}
       {showManualModal && (
