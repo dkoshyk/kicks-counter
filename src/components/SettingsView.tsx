@@ -248,7 +248,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       const text = await file.text();
       const confirmImport = window.confirm(
-        'Бажаєте імпортувати дані з цієї резервної копії? Існучі сесії будуть доповнені новими даними.'
+        'Бажаєте імпортувати дані з цієї резервної копії? Існуючі сесії будуть доповнені новими даними.'
       );
       if (!confirmImport) return;
 
@@ -821,8 +821,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   type="text"
                   value={manualRoomInput}
                   onChange={(e) => setManualRoomInput(e.target.value)}
-                  placeholder="poshtovhy-room-..."
-                  className="w-full px-3 py-2 rounded-xl border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-xs font-mono text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                  placeholder="напр. A9K2M7"
+                  className="w-full px-3 py-2 rounded-xl border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-xs font-mono uppercase text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-rose-500"
                 />
                 <button
                   type="button"

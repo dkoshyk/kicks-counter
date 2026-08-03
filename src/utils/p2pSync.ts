@@ -40,7 +40,7 @@ class P2PSyncManager {
       this.autoReconnect();
     });
 
-    // Listen to app foregrounding (unlocking phone screen after 10 hours)
+    // Listen to app foregrounding (unlocking phone screen after long periods)
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         this.autoReconnect();
@@ -107,7 +107,8 @@ class P2PSyncManager {
    */
   public async initMaster(customRoomId?: string): Promise<string> {
     this.role = 'master';
-    this.roomId = customRoomId || `poshtovhy-room-${Math.random().toString(36).substring(2, 8)}`;
+    // Generate clean short 6-character code without prefix
+    this.roomId = customRoomId || Math.random().toString(36).substring(2, 8).toUpperCase();
     
     localStorage.setItem('poshtovhy_p2p_role', 'master');
     localStorage.setItem('poshtovhy_p2p_room_id', this.roomId);
@@ -144,12 +145,13 @@ class P2PSyncManager {
    */
   public async connectAsSlave(targetRoomId: string): Promise<boolean> {
     this.role = 'slave';
-    this.roomId = targetRoomId;
+    const cleanRoomId = targetRoomId.trim().toUpperCase();
+    this.roomId = cleanRoomId;
     
     localStorage.setItem('poshtovhy_p2p_role', 'slave');
-    localStorage.setItem('poshtovhy_p2p_room_id', targetRoomId);
+    localStorage.setItem('poshtovhy_p2p_room_id', cleanRoomId);
 
-    const slavePeerId = `poshtovhy-slave-${Math.random().toString(36).substring(2, 8)}`;
+    const slavePeerId = `slave-${Math.random().toString(36).substring(2, 8)}`;
 
     if (this.peer) {
       this.peer.destroy();
@@ -162,7 +164,7 @@ class P2PSyncManager {
 
       this.peer.on('open', () => {
         if (!this.peer) return;
-        const conn = this.peer.connect(targetRoomId, {
+        const conn = this.peer.connect(cleanRoomId, {
           reliable: true
         });
 
@@ -175,7 +177,7 @@ class P2PSyncManager {
             this.reconnectInterval = null;
           }
 
-          // Request full history upon initial pair or after 10-hour reconnect
+          // Request full history upon initial pair
           this.sendPayload(conn, {
             type: 'REQUEST_HISTORY',
             senderRole: 'slave'
