@@ -27,11 +27,80 @@ class P2PSyncManager {
   private role: Role = 'none';
   private connections: Map<string, DataConnection> = new Map();
   private roomId: string = '';
+  private reconnectInterval: any = null;
   
   // Callbacks
   private onLiveUpdateCb: ((state: LiveSessionState | null) => void) | null = null;
   private onStatusChangeCb: ((status: string, connectedCount: number) => void) | null = null;
   private onSessionReceivedCb: ((message: string) => void) | null = null;
+
+  constructor() {
+    // Listen to network online event
+    window.addEventListener('online', () => {
+      this.autoReconnect();
+    });
+
+    // Listen to app foregrounding (unlocking phone screen after 10 hours)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        this.autoReconnect();
+      }
+    });
+
+    // Auto-reconnect on startup if previously paired
+    setTimeout(() => {
+      this.autoReconnect();
+    }, 1000);
+  }
+
+  /**
+   * Auto-reconnect from saved localStorage settings
+   */
+  public async autoReconnect() {
+    const savedRole = (localStorage.getItem('poshtovhy_p2p_role') as Role) || 'none';
+    const savedRoomId = localStorage.getItem('poshtovhy_p2p_room_id') || '';
+
+    if (savedRole === 'master' && savedRoomId) {
+      if (this.role !== 'master' || !this.peer) {
+        await this.initMaster(savedRoomId);
+      }
+    } else if (savedRole === 'slave' && savedRoomId) {
+      if (this.connections.size === 0) {
+        this.updateStatus('Відновлення звʼязку з мамою... 🟡', 0);
+        try {
+          await this.connectAsSlave(savedRoomId);
+        } catch (_) {
+          this.scheduleReconnect();
+        }
+      }
+    }
+  }
+
+  /**
+   * Schedule automatic retry loop
+   */
+  private scheduleReconnect() {
+    if (this.reconnectInterval) return;
+    this.reconnectInterval = setInterval(async () => {
+      const savedRole = localStorage.getItem('poshtovhy_p2p_role');
+      const savedRoomId = localStorage.getItem('poshtovhy_p2p_room_id');
+
+      if (savedRole === 'slave' && savedRoomId && this.connections.size === 0) {
+        try {
+          await this.connectAsSlave(savedRoomId);
+          if (this.reconnectInterval) {
+            clearInterval(this.reconnectInterval);
+            this.reconnectInterval = null;
+          }
+        } catch (_) {}
+      } else {
+        if (this.reconnectInterval) {
+          clearInterval(this.reconnectInterval);
+          this.reconnectInterval = null;
+        }
+      }
+    }, 5000);
+  }
 
   /**
    * Initialize Mother as Master
@@ -40,6 +109,9 @@ class P2PSyncManager {
     this.role = 'master';
     this.roomId = customRoomId || `poshtovhy-room-${Math.random().toString(36).substring(2, 8)}`;
     
+    localStorage.setItem('poshtovhy_p2p_role', 'master');
+    localStorage.setItem('poshtovhy_p2p_room_id', this.roomId);
+
     if (this.peer) {
       this.peer.destroy();
     }
@@ -51,7 +123,7 @@ class P2PSyncManager {
 
       this.peer.on('open', (id) => {
         this.roomId = id;
-        this.updateStatus('Майстер активний (Очікування підключення)', 0);
+        this.updateStatus('Майстер активний (Очікування підключення)', this.connections.size);
         resolve(id);
       });
 
@@ -72,6 +144,11 @@ class P2PSyncManager {
    */
   public async connectAsSlave(targetRoomId: string): Promise<boolean> {
     this.role = 'slave';
+    this.roomId = targetRoomId;
+    
+    localStorage.setItem('poshtovhy_p2p_role', 'slave');
+    localStorage.setItem('poshtovhy_p2p_room_id', targetRoomId);
+
     const slavePeerId = `poshtovhy-slave-${Math.random().toString(36).substring(2, 8)}`;
 
     if (this.peer) {
@@ -93,7 +170,12 @@ class P2PSyncManager {
           this.setupConnection(conn);
           this.updateStatus('Підключено до мами 🟢', 1);
 
-          // Request full history upon initial pair
+          if (this.reconnectInterval) {
+            clearInterval(this.reconnectInterval);
+            this.reconnectInterval = null;
+          }
+
+          // Request full history upon initial pair or after 10-hour reconnect
           this.sendPayload(conn, {
             type: 'REQUEST_HISTORY',
             senderRole: 'slave'
@@ -104,14 +186,16 @@ class P2PSyncManager {
 
         conn.on('error', (err) => {
           console.error('Connection error:', err);
-          this.updateStatus('Помилка підключення до кімнати', 0);
+          this.updateStatus('Відновлення звʼязку з мамою... 🟡', 0);
+          this.scheduleReconnect();
           reject(err);
         });
       });
 
       this.peer.on('error', (err) => {
         console.error('PeerJS Slave Error:', err);
-        this.updateStatus('Помилка мережі P2P', 0);
+        this.updateStatus('Відновлення звʼязку з мамою... 🟡', 0);
+        this.scheduleReconnect();
         reject(err);
       });
     });
@@ -134,12 +218,18 @@ class P2PSyncManager {
 
     conn.on('close', () => {
       this.connections.delete(conn.peer);
+      const isSlave = this.role === 'slave';
+      
       this.updateStatus(
-        this.role === 'master' ? `Підключено пристроїв: ${this.connections.size}` : 'Відключено',
+        this.role === 'master' ? `Підключено пристроїв: ${this.connections.size}` : 'Відновлення звʼязку... 🟡',
         this.connections.size
       );
-      if (this.role === 'slave' && this.onLiveUpdateCb) {
-        this.onLiveUpdateCb(null);
+
+      if (isSlave) {
+        if (this.onLiveUpdateCb) {
+          this.onLiveUpdateCb(null);
+        }
+        this.scheduleReconnect();
       }
     });
   }
@@ -274,9 +364,17 @@ class P2PSyncManager {
   }
 
   /**
-   * Master disconnects specific peer or all peers
+   * Master disconnects specific peer or all peers & clears storage
    */
   public disconnectAll() {
+    if (this.reconnectInterval) {
+      clearInterval(this.reconnectInterval);
+      this.reconnectInterval = null;
+    }
+
+    localStorage.removeItem('poshtovhy_p2p_role');
+    localStorage.removeItem('poshtovhy_p2p_room_id');
+
     this.connections.forEach((conn) => {
       this.sendPayload(conn, { type: 'DISCONNECT', senderRole: this.role });
       conn.close();

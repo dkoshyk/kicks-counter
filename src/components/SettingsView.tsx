@@ -4,7 +4,7 @@ import { Html5QrcodeScanner } from 'html5-qrcode';
 import { exportCSV, exportBackupJSON, importBackupJSON, clearAllData } from '../db';
 import { requestNotificationPermission, getNotificationPermissionState, triggerKickReminderNotification } from '../utils/notifications';
 import { p2pSyncManager } from '../utils/p2pSync';
-import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User, Users, QrCode, Camera, RefreshCw, X, Radio } from 'lucide-react';
+import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User, Users, QrCode, Camera, RefreshCw, X, Radio, Copy } from 'lucide-react';
 
 interface SettingsViewProps {
   defaultTargetKicks: number;
@@ -42,6 +42,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [masterQrDataUrl, setMasterQrDataUrl] = useState<string>('');
   const [showScannerModal, setShowScannerModal] = useState<boolean>(false);
   const [manualRoomInput, setManualRoomInput] = useState<string>('');
+  const [copiedRoomCode, setCopiedRoomCode] = useState<boolean>(false);
   const scannerRef = useRef<Html5QrcodeScanner | null>(null);
 
   // Notification state
@@ -79,9 +80,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       const roomId = await p2pSyncManager.initMaster();
       const qrUrl = await QRCode.toDataURL(roomId, {
-        width: 320,
-        margin: 2,
-        color: { dark: '#E11D48', light: '#FFFFFF' }
+        width: 360,
+        margin: 4,
+        errorCorrectionLevel: 'M',
+        color: { dark: '#000000', light: '#FFFFFF' }
       });
       setMasterQrDataUrl(qrUrl);
       setShowMasterQrModal(true);
@@ -99,7 +101,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       }
       const scanner = new Html5QrcodeScanner(
         'p2p-qr-reader',
-        { fps: 10, qrbox: { width: 250, height: 250 } },
+        {
+          fps: 15,
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const minDim = Math.min(viewfinderWidth, viewfinderHeight);
+            return { width: Math.floor(minDim * 0.8), height: Math.floor(minDim * 0.8) };
+          },
+          aspectRatio: 1.0,
+          showTorchButtonIfSupported: true
+        },
         false
       );
 
@@ -139,6 +149,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     p2pSyncManager.requestManualSync();
     setExportMessage('Запит синхронізації відправлено мамі...');
     setTimeout(() => setExportMessage(null), 3000);
+  };
+
+  const handleCopyRoomCode = () => {
+    const code = p2pSyncManager.getRoomId();
+    if (!code) return;
+    navigator.clipboard.writeText(code);
+    setCopiedRoomCode(true);
+    setTimeout(() => setCopiedRoomCode(false), 3000);
   };
 
   const handleToggleReminder = async () => {
@@ -230,7 +248,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       const text = await file.text();
       const confirmImport = window.confirm(
-        'Бажаєте імпортувати дані з цієї резервної копії? Існуючі сесії будуть доповнені новими даними.'
+        'Бажаєте імпортувати дані з цієї резервної копії? Існучі сесії будуть доповнені новими даними.'
       );
       if (!confirmImport) return;
 
@@ -717,22 +735,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             </div>
 
-            <div className="bg-gradient-to-tr from-rose-50 to-pink-50 dark:from-zinc-800 dark:to-zinc-900 p-4 rounded-2xl border border-rose-100 dark:border-zinc-700 flex flex-col items-center justify-center space-y-2">
+            <div className="bg-white p-4 rounded-2xl border border-gray-200 dark:border-zinc-700 flex flex-col items-center justify-center space-y-2">
               {masterQrDataUrl ? (
                 <img
                   src={masterQrDataUrl}
                   alt="P2P Room QR Code"
-                  className="w-56 h-56 rounded-xl shadow-md border-4 border-white dark:border-zinc-800"
+                  className="w-60 h-60 rounded-xl shadow-md border-4 border-white"
                 />
               ) : (
-                <div className="w-56 h-56 flex items-center justify-center text-xs text-gray-400">
+                <div className="w-60 h-60 flex items-center justify-center text-xs text-gray-400">
                   Генерація QR-коду...
                 </div>
               )}
-              <p className="text-[11px] font-semibold text-rose-600 dark:text-rose-300">
-                Код кімнати: <span className="font-mono underline">{p2pSyncManager.getRoomId()}</span>
-              </p>
-              <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
+              
+              <div className="flex items-center justify-center space-x-2 pt-1">
+                <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  Код: <strong className="font-mono text-rose-600 dark:text-rose-400">{p2pSyncManager.getRoomId()}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyRoomCode}
+                  className="px-2 py-1 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 text-rose-600 dark:text-rose-300 text-[11px] font-bold rounded-lg border border-rose-200 dark:border-rose-900/40 flex items-center space-x-1"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>{copiedRoomCode ? 'Скопійовано!' : 'Копіювати'}</span>
+                </button>
+              </div>
+
+              <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed pt-1">
                 Попросіть тата відкрити додатчок та натиснути <strong>«Тато: Зчитати QR»</strong>
               </p>
             </div>
