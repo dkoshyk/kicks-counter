@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
+import QRCode from 'qrcode';
+import { Html5QrcodeScanner } from 'html5-qrcode';
 import { exportCSV, exportBackupJSON, importBackupJSON, clearAllData } from '../db';
 import { requestNotificationPermission, getNotificationPermissionState, triggerKickReminderNotification } from '../utils/notifications';
-import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User } from 'lucide-react';
+import { p2pSyncManager } from '../utils/p2pSync';
+import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User, Users, QrCode, Camera, RefreshCw, X, Radio } from 'lucide-react';
 
 interface SettingsViewProps {
   defaultTargetKicks: number;
@@ -31,6 +34,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // P2P State
+  const [p2pRole, setP2pRole] = useState<'master' | 'slave' | 'none'>(p2pSyncManager.getRole());
+  const [p2pStatus, setP2pStatus] = useState<string>('Не підключено');
+  const [connectedCount, setConnectedCount] = useState<number>(0);
+  const [showMasterQrModal, setShowMasterQrModal] = useState<boolean>(false);
+  const [masterQrDataUrl, setMasterQrDataUrl] = useState<string>('');
+  const [showScannerModal, setShowScannerModal] = useState<boolean>(false);
+  const [manualRoomInput, setManualRoomInput] = useState<string>('');
+  const scannerRef = useRef<Html5QrcodeScanner | null>(null);
+
   // Notification state
   const [reminderEnabled, setReminderEnabled] = useState<boolean>(() => {
     return localStorage.getItem('kick_counter_reminder_enabled') === 'true';
@@ -41,12 +54,92 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [permissionState, setPermissionState] = useState<string>(getNotificationPermissionState());
 
   useEffect(() => {
-    localStorage.setItem('kick_counter_reminder_enabled', reminderEnabled ? 'true' : 'false');
-  }, [reminderEnabled]);
+    p2pSyncManager.setOnStatusChange((status, count) => {
+      setP2pStatus(status);
+      setConnectedCount(count);
+      setP2pRole(p2pSyncManager.getRole());
+    });
 
+    p2pSyncManager.setOnSessionReceived((msg) => {
+      setExportMessage(msg);
+      setTimeout(() => setExportMessage(null), 4000);
+    });
+  }, []);
+
+  // Cleanup scanner on unmount
   useEffect(() => {
-    localStorage.setItem('kick_counter_reminder_time', reminderTime);
-  }, [reminderTime]);
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current.clear().catch(() => {});
+      }
+    };
+  }, []);
+
+  const handleStartMasterMode = async () => {
+    try {
+      const roomId = await p2pSyncManager.initMaster();
+      const qrUrl = await QRCode.toDataURL(roomId, {
+        width: 320,
+        margin: 2,
+        color: { dark: '#E11D48', light: '#FFFFFF' }
+      });
+      setMasterQrDataUrl(qrUrl);
+      setShowMasterQrModal(true);
+      setP2pRole('master');
+    } catch (err) {
+      alert('Помилка створення P2P кімнати');
+    }
+  };
+
+  const handleStartScanner = () => {
+    setShowScannerModal(true);
+    setTimeout(() => {
+      if (scannerRef.current) {
+        scannerRef.current.clear().catch(() => {});
+      }
+      const scanner = new Html5QrcodeScanner(
+        'p2p-qr-reader',
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        false
+      );
+
+      scanner.render(
+        async (decodedText) => {
+          scanner.clear().catch(() => {});
+          setShowScannerModal(false);
+          await connectToRoom(decodedText);
+        },
+        () => {}
+      );
+
+      scannerRef.current = scanner;
+    }, 300);
+  };
+
+  const connectToRoom = async (roomId: string) => {
+    try {
+      setExportMessage(`Підключення до кімнати ${roomId}...`);
+      await p2pSyncManager.connectAsSlave(roomId.trim());
+      setP2pRole('slave');
+      setExportMessage('Успішно підключено до мами! 🌸');
+      setTimeout(() => setExportMessage(null), 4000);
+    } catch (err) {
+      alert('Не вдалося підключитися до кімнати. Перевірте код або спробуйте ще раз.');
+      setExportMessage(null);
+    }
+  };
+
+  const handleDisconnectP2P = () => {
+    p2pSyncManager.disconnectAll();
+    setP2pRole('none');
+    setShowMasterQrModal(false);
+  };
+
+  const handleManualSyncRequest = () => {
+    p2pSyncManager.requestManualSync();
+    setExportMessage('Запит синхронізації відправлено мамі...');
+    setTimeout(() => setExportMessage(null), 3000);
+  };
 
   const handleToggleReminder = async () => {
     if (!reminderEnabled) {
@@ -196,6 +289,110 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* FAMILY P2P LOCAL SYNC CARD (MOTHER & FATHER) */}
+      <div className="bg-white dark:bg-[#1C1C1E] p-5 rounded-3xl border border-gray-100 dark:border-zinc-800/80 shadow-sm space-y-4">
+        <div>
+          <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center justify-between">
+            <span className="flex items-center">
+              <Users className="w-4 h-4 text-rose-500 mr-2" />
+              Сімейний доступ P2P (Мама + Тато)
+            </span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 dark:bg-rose-950/50 text-rose-500 border border-rose-100 dark:border-rose-900/40">
+              Wi-Fi P2P
+            </span>
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+            Синхронізація сесій між мамою (Майстер) та татом (Отримувач) через QR-код.
+          </p>
+        </div>
+
+        {/* P2P Status Indicator */}
+        <div className="flex items-center justify-between p-3 rounded-2xl bg-gray-50 dark:bg-zinc-800/60 border border-gray-100 dark:border-zinc-800 text-xs">
+          <div className="flex items-center space-x-2">
+            <Radio className={`w-4 h-4 ${p2pRole !== 'none' ? 'text-emerald-500 animate-pulse' : 'text-gray-400'}`} />
+            <span className="font-semibold text-gray-800 dark:text-gray-200">
+              {p2pStatus}
+            </span>
+          </div>
+          {p2pRole !== 'none' && (
+            <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
+              {p2pRole === 'master' ? 'Мама (Майстер)' : 'Тато (Клієнт)'}
+            </span>
+          )}
+        </div>
+
+        {/* Actions for Master & Slave */}
+        <div className="space-y-2">
+          {p2pRole === 'none' && (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={handleStartMasterMode}
+                className="py-3 px-3 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-md shadow-rose-500/20 flex items-center justify-center space-x-1.5 transition-all active:scale-95"
+              >
+                <QrCode className="w-4 h-4" />
+                <span>Мама: Показати QR</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleStartScanner}
+                className="py-3 px-3 bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 text-gray-800 dark:text-gray-200 font-bold text-xs rounded-xl border border-gray-200 dark:border-zinc-700 flex items-center justify-center space-x-1.5 transition-all active:scale-95"
+              >
+                <Camera className="w-4 h-4 text-rose-500" />
+                <span>Тато: Зчитати QR</span>
+              </button>
+            </div>
+          )}
+
+          {/* Master Controls */}
+          {p2pRole === 'master' && (
+            <div className="space-y-2">
+              <div className="flex space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setShowMasterQrModal(true)}
+                  className="w-1/2 py-2.5 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-sm flex items-center justify-center space-x-1"
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>Показати QR ще раз</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDisconnectP2P}
+                  className="w-1/2 py-2.5 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 text-red-600 dark:text-red-400 font-semibold text-xs rounded-xl border border-red-200 dark:border-red-900/50"
+                >
+                  Закрити доступ
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Slave Controls */}
+          {p2pRole === 'slave' && (
+            <div className="space-y-2">
+              <div className="flex space-x-2">
+                <button
+                  type="button"
+                  onClick={handleManualSyncRequest}
+                  className="w-1/2 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl shadow-sm flex items-center justify-center space-x-1"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Синхронізувати</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDisconnectP2P}
+                  className="w-1/2 py-2.5 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 text-red-600 dark:text-red-400 font-semibold text-xs rounded-xl border border-red-200 dark:border-red-900/50"
+                >
+                  Від'єднатися
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* User Name & Personalization Settings */}
       <div className="bg-white dark:bg-[#1C1C1E] p-5 rounded-3xl border border-gray-100 dark:border-zinc-800/80 shadow-sm space-y-4">
@@ -498,9 +695,122 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         )}
         <p className="text-[11px] text-gray-400 dark:text-gray-600">
-          «Поштовхи» v1.4.0 • iOS HIG PWA
+          «Поштовхи» v1.5.0 • P2P Family Sync
         </p>
       </div>
+
+      {/* MASTER QR MODAL (MOTHER) */}
+      {showMasterQrModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-sm bg-white dark:bg-[#1C1C1E] rounded-3xl p-6 shadow-2xl border border-gray-100 dark:border-zinc-800 text-center space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-gray-900 dark:text-white flex items-center">
+                <Users className="w-4 h-4 text-rose-500 mr-1.5" />
+                QR-код кімнати мами
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowMasterQrModal(false)}
+                className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-gradient-to-tr from-rose-50 to-pink-50 dark:from-zinc-800 dark:to-zinc-900 p-4 rounded-2xl border border-rose-100 dark:border-zinc-700 flex flex-col items-center justify-center space-y-2">
+              {masterQrDataUrl ? (
+                <img
+                  src={masterQrDataUrl}
+                  alt="P2P Room QR Code"
+                  className="w-56 h-56 rounded-xl shadow-md border-4 border-white dark:border-zinc-800"
+                />
+              ) : (
+                <div className="w-56 h-56 flex items-center justify-center text-xs text-gray-400">
+                  Генерація QR-коду...
+                </div>
+              )}
+              <p className="text-[11px] font-semibold text-rose-600 dark:text-rose-300">
+                Код кімнати: <span className="font-mono underline">{p2pSyncManager.getRoomId()}</span>
+              </p>
+              <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
+                Попросіть тата відкрити додатчок та натиснути <strong>«Тато: Зчитати QR»</strong>
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between text-xs px-2">
+              <span className="text-gray-500 dark:text-gray-400">
+                Підключено пристроїв: <strong>{connectedCount}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={handleDisconnectP2P}
+                className="text-red-500 font-bold hover:underline"
+              >
+                Закрити доступ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SLAVE SCANNER MODAL (FATHER) */}
+      {showScannerModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-sm bg-white dark:bg-[#1C1C1E] rounded-3xl p-6 shadow-2xl border border-gray-100 dark:border-zinc-800 text-center space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-gray-900 dark:text-white flex items-center">
+                <Camera className="w-4 h-4 text-rose-500 mr-1.5" />
+                Зчитати QR-код мами
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (scannerRef.current) {
+                    scannerRef.current.clear().catch(() => {});
+                  }
+                  setShowScannerModal(false);
+                }}
+                className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Camera scanner element */}
+            <div className="w-full bg-black rounded-2xl overflow-hidden min-h-[260px] flex items-center justify-center relative">
+              <div id="p2p-qr-reader" className="w-full text-white text-xs"></div>
+            </div>
+
+            {/* Manual Room ID Input Fallback */}
+            <div className="pt-2 border-t border-gray-100 dark:border-zinc-800 space-y-2">
+              <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 block text-left">
+                Або введіть код кімнати вручну:
+              </label>
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={manualRoomInput}
+                  onChange={(e) => setManualRoomInput(e.target.value)}
+                  placeholder="poshtovhy-room-..."
+                  className="w-full px-3 py-2 rounded-xl border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-xs font-mono text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (manualRoomInput) {
+                      setShowScannerModal(false);
+                      connectToRoom(manualRoomInput);
+                    }
+                  }}
+                  className="px-3 py-2 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-sm"
+                >
+                  Зʼєднати
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

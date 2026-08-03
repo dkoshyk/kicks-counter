@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import confetti from 'canvas-confetti';
 import { db, startSession, recordKick, undoKick, finishSession, cancelSession, formatDuration } from '../db';
+import { p2pSyncManager, type LiveSessionState } from '../utils/p2pSync';
 import { Play, Plus, RotateCcw, CheckCircle2, Heart, Clock, Target, Info, Sparkles, Award, Bell } from 'lucide-react';
 
 interface SessionViewProps {
@@ -15,6 +16,10 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
   const [note, setNote] = useState<string>('');
   const [showCompletionModal, setShowCompletionModal] = useState<boolean>(false);
   const [completedSessionId, setCompletedSessionId] = useState<number | null>(null);
+
+  // Real-time live P2P state (Father's side)
+  const [liveP2PState, setLiveP2PState] = useState<LiveSessionState | null>(null);
+
   const [quickNotes] = useState<string[]>([
     'Після обіду',
     'Солодощі',
@@ -23,6 +28,13 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
     'Активні рухи',
     'Спокійні поштовхи'
   ]);
+
+  // Listen to P2P Live Updates
+  useEffect(() => {
+    p2pSyncManager.setOnLiveUpdate((state) => {
+      setLiveP2PState(state);
+    });
+  }, []);
 
   // Fetch active session from Dexie
   const activeSession = useLiveQuery(async () => {
@@ -38,6 +50,21 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
       .reverse()
       .sortBy('timestamp');
   }, [activeSession?.id]);
+
+  // Broadcast live session state when Mother is counting
+  useEffect(() => {
+    if (activeSession) {
+      p2pSyncManager.broadcastLiveSession({
+        isCounting: true,
+        kickCount: activeSession.kickCount,
+        targetKicks: activeSession.targetKicks,
+        elapsedMs: elapsedTime,
+        startTime: activeSession.startTime
+      });
+    } else {
+      p2pSyncManager.broadcastLiveSession(null);
+    }
+  }, [activeSession, activeSession?.kickCount, elapsedTime]);
 
   // Timer effect for active session
   useEffect(() => {
@@ -73,7 +100,6 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
   const handleRecordKick = async () => {
     if (!activeSession?.id) return;
 
-    // Haptic feedback
     if ('vibrate' in navigator) {
       try { navigator.vibrate([60]); } catch (_) {}
     }
@@ -81,7 +107,6 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
     const { reachedGoal } = await recordKick(activeSession.id);
 
     if (reachedGoal) {
-      // Trigger celebration confetti
       confetti({
         particleCount: 100,
         spread: 70,
@@ -111,15 +136,24 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
   const handleSaveCompletedSession = async () => {
     if (!completedSessionId) return;
     await finishSession(completedSessionId, note);
+    const sessionObj = await db.sessions.get(completedSessionId);
+    
     setShowCompletionModal(false);
     setNote('');
     setCompletedSessionId(null);
+
+    // Broadcast completed session to Father over P2P DataChannel
+    if (sessionObj) {
+      const kicksList = await db.kicks.where('sessionId').equals(completedSessionId).toArray();
+      p2pSyncManager.broadcastCompletedSession(sessionObj, kicksList);
+    }
   };
 
   const handleCancelSession = async () => {
     if (!activeSession?.id) return;
     if (window.confirm('Ви впевнені, що хочете скасувати поточну сесію?')) {
       await cancelSession(activeSession.id);
+      p2pSyncManager.broadcastLiveSession(null);
     }
   };
 
@@ -137,7 +171,6 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Progress percentage
   const currentCount = activeSession?.kickCount || 0;
   const currentTarget = activeSession?.targetKicks || targetKicks;
   const progressPercent = Math.min(100, Math.round((currentCount / currentTarget) * 100));
@@ -147,6 +180,32 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
       {/* IDLE STATE */}
       {!activeSession && (
         <div className="w-full max-w-md my-auto flex flex-col items-center text-center space-y-5">
+          {/* Read-Only Real-Time Live Sync Counter for Father */}
+          {liveP2PState && liveP2PState.isCounting && (
+            <div className="w-full bg-gradient-to-r from-purple-500/15 via-pink-500/20 to-rose-500/15 dark:from-purple-950/40 dark:via-pink-950/40 dark:to-rose-950/40 p-4 rounded-3xl border border-pink-200 dark:border-pink-800/40 shadow-sm text-left flex items-center justify-between animate-pulse">
+              <div className="flex items-center space-x-3">
+                <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-rose-500 to-pink-500 flex items-center justify-center text-white shrink-0 shadow-md">
+                  <Heart className="w-6 h-6 fill-white" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-1 text-xs font-bold text-rose-600 dark:text-rose-300">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Пряма трансляція від мами 🌸</span>
+                  </div>
+                  <p className="text-sm font-extrabold text-gray-900 dark:text-white mt-0.5">
+                    {liveP2PState.kickCount} з {liveP2PState.targetKicks} поштовхів
+                  </p>
+                </div>
+              </div>
+
+              <div className="text-right">
+                <span className="text-[10px] uppercase tracking-wider font-extrabold text-rose-600 dark:text-rose-300 bg-rose-100 dark:bg-rose-950/70 px-2.5 py-1 rounded-full border border-rose-200 dark:border-rose-800">
+                  Режим перегляду
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="relative">
             <div className="w-32 h-32 rounded-full bg-gradient-to-tr from-rose-400 to-pink-500 flex items-center justify-center shadow-lg shadow-rose-500/25 animate-heart-pulse">
               <Heart className="w-16 h-16 text-white fill-white" />
@@ -242,7 +301,6 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
 
           {/* Big Counter Ring & Button */}
           <div className="relative my-4 flex flex-col items-center justify-center">
-            {/* SVG Ring Progress */}
             <div className="relative w-64 h-64 flex items-center justify-center">
               <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
                 <circle
@@ -266,7 +324,6 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
                 />
               </svg>
 
-              {/* Central Touch Target / Counter */}
               <button
                 type="button"
                 onClick={handleRecordKick}

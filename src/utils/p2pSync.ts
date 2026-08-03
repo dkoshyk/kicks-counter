@@ -1,0 +1,338 @@
+import Peer, { type DataConnection } from 'peerjs';
+import { db, addManualSession, type Session, type Kick } from '../db';
+
+export type Role = 'master' | 'slave' | 'none';
+
+export interface LiveSessionState {
+  isCounting: boolean;
+  kickCount: number;
+  targetKicks: number;
+  elapsedMs: number;
+  startTime: number;
+}
+
+export interface P2PPayload {
+  type: 'PAIR_ACCEPT' | 'LIVE_SESSION_UPDATE' | 'SESSION_COMPLETED' | 'REQUEST_HISTORY' | 'HISTORY_RESPONSE' | 'DISCONNECT';
+  senderRole: Role;
+  liveState?: LiveSessionState;
+  completedSession?: {
+    session: Session;
+    kicks: Kick[];
+  };
+  historySessions?: Session[];
+}
+
+class P2PSyncManager {
+  private peer: Peer | null = null;
+  private role: Role = 'none';
+  private connections: Map<string, DataConnection> = new Map();
+  private roomId: string = '';
+  
+  // Callbacks
+  private onLiveUpdateCb: ((state: LiveSessionState | null) => void) | null = null;
+  private onStatusChangeCb: ((status: string, connectedCount: number) => void) | null = null;
+  private onSessionReceivedCb: ((message: string) => void) | null = null;
+
+  /**
+   * Initialize Mother as Master
+   */
+  public async initMaster(customRoomId?: string): Promise<string> {
+    this.role = 'master';
+    this.roomId = customRoomId || `poshtovhy-room-${Math.random().toString(36).substring(2, 8)}`;
+    
+    if (this.peer) {
+      this.peer.destroy();
+    }
+
+    return new Promise((resolve, reject) => {
+      this.peer = new Peer(this.roomId, {
+        debug: 1
+      });
+
+      this.peer.on('open', (id) => {
+        this.roomId = id;
+        this.updateStatus('Майстер активний (Очікування підключення)', 0);
+        resolve(id);
+      });
+
+      this.peer.on('connection', (conn) => {
+        this.setupConnection(conn);
+      });
+
+      this.peer.on('error', (err) => {
+        console.error('PeerJS Master Error:', err);
+        this.updateStatus(`Помилка підключення: ${err.message}`, this.connections.size);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Connect Father as Slave to Mother's Room ID
+   */
+  public async connectAsSlave(targetRoomId: string): Promise<boolean> {
+    this.role = 'slave';
+    const slavePeerId = `poshtovhy-slave-${Math.random().toString(36).substring(2, 8)}`;
+
+    if (this.peer) {
+      this.peer.destroy();
+    }
+
+    return new Promise((resolve, reject) => {
+      this.peer = new Peer(slavePeerId, {
+        debug: 1
+      });
+
+      this.peer.on('open', () => {
+        if (!this.peer) return;
+        const conn = this.peer.connect(targetRoomId, {
+          reliable: true
+        });
+
+        conn.on('open', () => {
+          this.setupConnection(conn);
+          this.updateStatus('Підключено до мами 🟢', 1);
+
+          // Request full history upon initial pair
+          this.sendPayload(conn, {
+            type: 'REQUEST_HISTORY',
+            senderRole: 'slave'
+          });
+
+          resolve(true);
+        });
+
+        conn.on('error', (err) => {
+          console.error('Connection error:', err);
+          this.updateStatus('Помилка підключення до кімнати', 0);
+          reject(err);
+        });
+      });
+
+      this.peer.on('error', (err) => {
+        console.error('PeerJS Slave Error:', err);
+        this.updateStatus('Помилка мережі P2P', 0);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Setup connection handlers
+   */
+  private setupConnection(conn: DataConnection) {
+    this.connections.set(conn.peer, conn);
+    this.updateStatus(
+      this.role === 'master' ? `Підключено пристроїв: ${this.connections.size}` : 'Підключено до мами 🟢',
+      this.connections.size
+    );
+
+    conn.on('data', async (data) => {
+      const payload = data as P2PPayload;
+      await this.handleIncomingPayload(conn, payload);
+    });
+
+    conn.on('close', () => {
+      this.connections.delete(conn.peer);
+      this.updateStatus(
+        this.role === 'master' ? `Підключено пристроїв: ${this.connections.size}` : 'Відключено',
+        this.connections.size
+      );
+      if (this.role === 'slave' && this.onLiveUpdateCb) {
+        this.onLiveUpdateCb(null);
+      }
+    });
+  }
+
+  /**
+   * Handle incoming payloads
+   */
+  private async handleIncomingPayload(conn: DataConnection, payload: P2PPayload) {
+    switch (payload.type) {
+      case 'LIVE_SESSION_UPDATE':
+        if (this.role === 'slave' && this.onLiveUpdateCb) {
+          this.onLiveUpdateCb(payload.liveState || null);
+        }
+        break;
+
+      case 'SESSION_COMPLETED':
+        if (this.role === 'slave' && payload.completedSession) {
+          const { session } = payload.completedSession;
+          try {
+            const startDate = new Date(session.startTime);
+            const durationMins = session.endTime
+              ? Math.max(1, Math.round((session.endTime - session.startTime) / 60000))
+              : 20;
+
+            await addManualSession({
+              dateStr: startDate.toISOString().slice(0, 10),
+              timeStr: startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }),
+              durationMinutes: durationMins,
+              kickCount: session.kickCount,
+              targetKicks: session.targetKicks,
+              note: `${session.note ? session.note + ' • ' : ''}Синхронізовано від мами 🌸`
+            });
+
+            if (this.onSessionReceivedCb) {
+              this.onSessionReceivedCb(`Отримано нову сесію від мами (${session.kickCount} поштовхів)!`);
+            }
+          } catch (err) {
+            console.error('Failed to import synced session:', err);
+          }
+        }
+        break;
+
+      case 'REQUEST_HISTORY':
+        if (this.role === 'master') {
+          const completedSessions = await db.sessions
+            .where('status')
+            .equals('completed')
+            .toArray();
+
+          this.sendPayload(conn, {
+            type: 'HISTORY_RESPONSE',
+            senderRole: 'master',
+            historySessions: completedSessions
+          });
+        }
+        break;
+
+      case 'HISTORY_RESPONSE':
+        if (this.role === 'slave' && payload.historySessions) {
+          for (const sess of payload.historySessions) {
+            const startDate = new Date(sess.startTime);
+            const durationMins = sess.endTime
+              ? Math.max(1, Math.round((sess.endTime - sess.startTime) / 60000))
+              : 20;
+
+            try {
+              await addManualSession({
+                dateStr: startDate.toISOString().slice(0, 10),
+                timeStr: startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }),
+                durationMinutes: durationMins,
+                kickCount: sess.kickCount,
+                targetKicks: sess.targetKicks,
+                note: `${sess.note ? sess.note + ' • ' : ''}Історія мами 🌸`
+              });
+            } catch (_) {}
+          }
+          if (this.onSessionReceivedCb) {
+            this.onSessionReceivedCb(`Синхронізовано ${payload.historySessions.length} сесій з історії мами!`);
+          }
+        }
+        break;
+
+      case 'DISCONNECT':
+        conn.close();
+        this.connections.delete(conn.peer);
+        break;
+    }
+  }
+
+  /**
+   * Broadcast real-time live session update (Mother to Father)
+   */
+  public broadcastLiveSession(liveState: LiveSessionState | null) {
+    if (this.role !== 'master') return;
+
+    this.broadcast({
+      type: 'LIVE_SESSION_UPDATE',
+      senderRole: 'master',
+      liveState: liveState || undefined
+    });
+  }
+
+  /**
+   * Broadcast completed session (Mother to Father)
+   */
+  public broadcastCompletedSession(session: Session, kicks: Kick[]) {
+    if (this.role !== 'master') return;
+
+    this.broadcast({
+      type: 'SESSION_COMPLETED',
+      senderRole: 'master',
+      completedSession: { session, kicks }
+    });
+  }
+
+  /**
+   * Broadcast payload to all connected peers
+   */
+  private broadcast(payload: P2PPayload) {
+    this.connections.forEach((conn) => {
+      this.sendPayload(conn, payload);
+    });
+  }
+
+  /**
+   * Send payload to specific connection
+   */
+  private sendPayload(conn: DataConnection, payload: P2PPayload) {
+    if (conn && conn.open) {
+      conn.send(payload);
+    }
+  }
+
+  /**
+   * Master disconnects specific peer or all peers
+   */
+  public disconnectAll() {
+    this.connections.forEach((conn) => {
+      this.sendPayload(conn, { type: 'DISCONNECT', senderRole: this.role });
+      conn.close();
+    });
+    this.connections.clear();
+    if (this.peer) {
+      this.peer.destroy();
+      this.peer = null;
+    }
+    this.role = 'none';
+    this.updateStatus('Відключено', 0);
+  }
+
+  /**
+   * Request manual sync from Slave side
+   */
+  public requestManualSync() {
+    if (this.role !== 'slave') return;
+    this.connections.forEach((conn) => {
+      this.sendPayload(conn, {
+        type: 'REQUEST_HISTORY',
+        senderRole: 'slave'
+      });
+    });
+  }
+
+  // Event Listeners
+  public setOnLiveUpdate(cb: (state: LiveSessionState | null) => void) {
+    this.onLiveUpdateCb = cb;
+  }
+
+  public setOnStatusChange(cb: (status: string, connectedCount: number) => void) {
+    this.onStatusChangeCb = cb;
+  }
+
+  public setOnSessionReceived(cb: (message: string) => void) {
+    this.onSessionReceivedCb = cb;
+  }
+
+  private updateStatus(status: string, count: number) {
+    if (this.onStatusChangeCb) {
+      this.onStatusChangeCb(status, count);
+    }
+  }
+
+  public getRole(): Role {
+    return this.role;
+  }
+
+  public getRoomId(): string {
+    return this.roomId;
+  }
+
+  public getConnectedCount(): number {
+    return this.connections.size;
+  }
+}
+
+export const p2pSyncManager = new P2PSyncManager();
