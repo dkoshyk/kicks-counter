@@ -12,7 +12,7 @@ export interface LiveSessionState {
 }
 
 export interface P2PPayload {
-  type: 'PAIR_ACCEPT' | 'LIVE_SESSION_UPDATE' | 'SESSION_COMPLETED' | 'SESSION_DELETED' | 'REQUEST_HISTORY' | 'HISTORY_RESPONSE' | 'DISCONNECT';
+  type: 'PAIR_ACCEPT' | 'LIVE_SESSION_UPDATE' | 'SESSION_COMPLETED' | 'SESSION_DELETED' | 'REQUEST_HISTORY' | 'HISTORY_RESPONSE' | 'DISCONNECT' | 'PING' | 'PONG';
   senderRole: Role;
   liveState?: LiveSessionState;
   completedSession?: {
@@ -27,8 +27,10 @@ class P2PSyncManager {
   private peer: Peer | null = null;
   private role: Role = 'none';
   private connections: Map<string, DataConnection> = new Map();
+  private connectionLastSeen: Map<string, number> = new Map();
   private roomId: string = '';
   private reconnectInterval: any = null;
+  private heartbeatInterval: any = null;
   
   // Callbacks
   private onLiveUpdateCb: ((state: LiveSessionState | null) => void) | null = null;
@@ -52,6 +54,46 @@ class P2PSyncManager {
     setTimeout(() => {
       this.autoReconnect();
     }, 1000);
+
+    // Start periodic background keep-alive check
+    this.startHeartbeat();
+  }
+
+  /**
+   * Keep-alive check: ping signaling server & WebRTC peer connections
+   */
+  private startHeartbeat() {
+    if (this.heartbeatInterval) return;
+    this.heartbeatInterval = setInterval(() => {
+      const now = Date.now();
+
+      // 1. Ensure signaling server connection is alive
+      if (this.peer && !this.peer.destroyed) {
+        if (this.peer.disconnected) {
+          console.warn('Signaling server disconnected. Reconnecting...');
+          this.peer.reconnect();
+        }
+      } else if (this.role !== 'none') {
+        this.autoReconnect();
+      }
+
+      // 2. Ping active WebRTC data connections & clean up dead ones
+      this.connections.forEach((conn, peerId) => {
+        if (!conn.open) {
+          this.cleanupConnection(peerId);
+          return;
+        }
+
+        const lastSeen = this.connectionLastSeen.get(peerId) || now;
+        if (now - lastSeen > 45000) {
+          console.warn(`Connection to ${peerId} timed out. Closing...`);
+          conn.close();
+          this.cleanupConnection(peerId);
+        } else {
+          this.sendPayload(conn, { type: 'PING', senderRole: this.role });
+        }
+      });
+    }, 15000);
   }
 
   /**
@@ -62,10 +104,19 @@ class P2PSyncManager {
     const savedRoomId = localStorage.getItem('poshtovhy_p2p_room_id') || '';
 
     if (savedRole === 'master' && savedRoomId) {
-      if (this.role !== 'master' || !this.peer) {
-        await this.initMaster(savedRoomId);
+      this.role = 'master';
+      if (!this.peer || this.peer.destroyed) {
+        try {
+          await this.initMaster(savedRoomId);
+        } catch (_) {}
+      } else if (this.peer.disconnected) {
+        this.peer.reconnect();
       }
     } else if (savedRole === 'slave' && savedRoomId) {
+      this.role = 'slave';
+      if (this.peer && this.peer.disconnected && !this.peer.destroyed) {
+        this.peer.reconnect();
+      }
       if (this.connections.size === 0) {
         this.updateStatus('Відновлення звʼязку з мамою... 🟡', 0);
         try {
@@ -78,7 +129,7 @@ class P2PSyncManager {
   }
 
   /**
-   * Schedule automatic retry loop
+   * Schedule automatic retry loop for slave
    */
   private scheduleReconnect() {
     if (this.reconnectInterval) return;
@@ -113,7 +164,7 @@ class P2PSyncManager {
     localStorage.setItem('poshtovhy_p2p_role', 'master');
     localStorage.setItem('poshtovhy_p2p_room_id', this.roomId);
 
-    if (this.peer) {
+    if (this.peer && !this.peer.destroyed) {
       this.peer.destroy();
     }
 
@@ -124,7 +175,10 @@ class P2PSyncManager {
 
       this.peer.on('open', (id) => {
         this.roomId = id;
-        this.updateStatus('Майстер активний (Очікування підключення)', this.connections.size);
+        this.updateStatus(
+          this.connections.size > 0 ? `Підключено пристроїв: ${this.connections.size}` : 'Майстер активний (Очікування підключення)',
+          this.connections.size
+        );
         resolve(id);
       });
 
@@ -132,8 +186,20 @@ class P2PSyncManager {
         this.setupConnection(conn);
       });
 
+      this.peer.on('disconnected', () => {
+        console.warn('Master disconnected from PeerJS signaling server. Reconnecting...');
+        if (this.peer && !this.peer.destroyed) {
+          this.peer.reconnect();
+        }
+      });
+
       this.peer.on('error', (err) => {
         console.error('PeerJS Master Error:', err);
+        if (err.type === 'unavailable-id') {
+          if (this.peer && !this.peer.destroyed) {
+            this.peer.reconnect();
+          }
+        }
         this.updateStatus(`Помилка підключення: ${err.message}`, this.connections.size);
         reject(err);
       });
@@ -153,7 +219,7 @@ class P2PSyncManager {
 
     const slavePeerId = `slave-${Math.random().toString(36).substring(2, 8)}`;
 
-    if (this.peer) {
+    if (this.peer && !this.peer.destroyed) {
       this.peer.destroy();
     }
 
@@ -194,6 +260,13 @@ class P2PSyncManager {
         });
       });
 
+      this.peer.on('disconnected', () => {
+        console.warn('Slave disconnected from PeerJS signaling server. Reconnecting...');
+        if (this.peer && !this.peer.destroyed) {
+          this.peer.reconnect();
+        }
+      });
+
       this.peer.on('error', (err) => {
         console.error('PeerJS Slave Error:', err);
         this.updateStatus('Відновлення звʼязку з мамою... 🟡', 0);
@@ -208,32 +281,47 @@ class P2PSyncManager {
    */
   private setupConnection(conn: DataConnection) {
     this.connections.set(conn.peer, conn);
+    this.connectionLastSeen.set(conn.peer, Date.now());
+
     this.updateStatus(
       this.role === 'master' ? `Підключено пристроїв: ${this.connections.size}` : 'Підключено до мами 🟢',
       this.connections.size
     );
 
     conn.on('data', async (data) => {
+      this.connectionLastSeen.set(conn.peer, Date.now());
       const payload = data as P2PPayload;
       await this.handleIncomingPayload(conn, payload);
     });
 
     conn.on('close', () => {
-      this.connections.delete(conn.peer);
-      const isSlave = this.role === 'slave';
-      
-      this.updateStatus(
-        this.role === 'master' ? `Підключено пристроїв: ${this.connections.size}` : 'Відновлення звʼязку... 🟡',
-        this.connections.size
-      );
-
-      if (isSlave) {
-        if (this.onLiveUpdateCb) {
-          this.onLiveUpdateCb(null);
-        }
-        this.scheduleReconnect();
-      }
+      this.cleanupConnection(conn.peer);
     });
+
+    conn.on('error', (err) => {
+      console.error(`DataConnection error (${conn.peer}):`, err);
+      this.cleanupConnection(conn.peer);
+    });
+  }
+
+  private cleanupConnection(peerId: string) {
+    this.connections.delete(peerId);
+    this.connectionLastSeen.delete(peerId);
+
+    const isSlave = this.role === 'slave';
+    this.updateStatus(
+      this.role === 'master'
+        ? (this.connections.size > 0 ? `Підключено пристроїв: ${this.connections.size}` : 'Майстер активний (Очікування підключення)')
+        : 'Відновлення звʼязку... 🟡',
+      this.connections.size
+    );
+
+    if (isSlave) {
+      if (this.onLiveUpdateCb) {
+        this.onLiveUpdateCb(null);
+      }
+      this.scheduleReconnect();
+    }
   }
 
   /**
@@ -241,6 +329,14 @@ class P2PSyncManager {
    */
   private async handleIncomingPayload(conn: DataConnection, payload: P2PPayload) {
     switch (payload.type) {
+      case 'PING':
+        this.sendPayload(conn, { type: 'PONG', senderRole: this.role });
+        break;
+
+      case 'PONG':
+        // Connection activity timestamp already updated in 'data' listener
+        break;
+
       case 'LIVE_SESSION_UPDATE':
         if (this.role === 'slave' && this.onLiveUpdateCb) {
           this.onLiveUpdateCb(payload.liveState || null);
@@ -357,7 +453,7 @@ class P2PSyncManager {
 
       case 'DISCONNECT':
         conn.close();
-        this.connections.delete(conn.peer);
+        this.cleanupConnection(conn.peer);
         break;
     }
   }
@@ -427,6 +523,10 @@ class P2PSyncManager {
       clearInterval(this.reconnectInterval);
       this.reconnectInterval = null;
     }
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
 
     localStorage.removeItem('poshtovhy_p2p_role');
     localStorage.removeItem('poshtovhy_p2p_room_id');
@@ -436,6 +536,7 @@ class P2PSyncManager {
       conn.close();
     });
     this.connections.clear();
+    this.connectionLastSeen.clear();
     if (this.peer) {
       this.peer.destroy();
       this.peer = null;
@@ -490,3 +591,4 @@ class P2PSyncManager {
 }
 
 export const p2pSyncManager = new P2PSyncManager();
+
