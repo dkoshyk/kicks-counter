@@ -198,6 +198,41 @@ export async function clearAllData(): Promise<void> {
 }
 
 /**
+ * Deduplicates sessions in local IndexedDB database by identifying entries
+ * with identical or near-identical start times (within 60s) and matching kick counts.
+ */
+export async function deduplicateSessions(): Promise<number> {
+  return await db.transaction('rw', db.sessions, db.kicks, async () => {
+    const allSessions = await db.sessions.toArray();
+    allSessions.sort((a, b) => a.startTime - b.startTime);
+    const toDeleteIds: number[] = [];
+    const seen: Session[] = [];
+
+    for (const session of allSessions) {
+      if (!session.id) continue;
+      
+      const duplicate = seen.find(s => 
+        Math.abs(s.startTime - session.startTime) < 60000 &&
+        s.kickCount === session.kickCount
+      );
+
+      if (duplicate) {
+        toDeleteIds.push(session.id);
+      } else {
+        seen.push(session);
+      }
+    }
+
+    for (const id of toDeleteIds) {
+      await db.kicks.where('sessionId').equals(id).delete();
+      await db.sessions.delete(id);
+    }
+
+    return toDeleteIds.length;
+  });
+}
+
+/**
  * Formats duration in milliseconds into a readable Ukrainian string (e.g. "12 хв 45 с")
  */
 export function formatDuration(durationMs: number): string {

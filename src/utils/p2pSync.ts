@@ -1,5 +1,5 @@
 import Peer, { type DataConnection } from 'peerjs';
-import { db, addManualSession, deleteSession, type Session, type Kick } from '../db';
+import { db, deleteSession, deduplicateSessions, type Session, type Kick } from '../db';
 
 export type Role = 'master' | 'slave' | 'none';
 
@@ -100,6 +100,10 @@ class P2PSyncManager {
    * Auto-reconnect from saved localStorage settings
    */
   public async autoReconnect() {
+    try {
+      await deduplicateSessions();
+    } catch (_) {}
+
     const savedRole = (localStorage.getItem('poshtovhy_p2p_role') as Role) || 'none';
     const savedRoomId = localStorage.getItem('poshtovhy_p2p_room_id') || '';
 
@@ -347,27 +351,23 @@ class P2PSyncManager {
         if (this.role === 'slave' && payload.completedSession) {
           const { session } = payload.completedSession;
           try {
-            // Deduplication check: verify if session with same startTime already exists
+            // Deduplication check: check within 60s window and matching kickCount
             const existingCount = await db.sessions
               .where('startTime')
-              .between(session.startTime - 2000, session.startTime + 2000)
+              .between(session.startTime - 60000, session.startTime + 60000)
+              .filter(s => s.kickCount === session.kickCount)
               .count();
 
             if (existingCount > 0) {
               return; // Skip duplicate!
             }
 
-            const startDate = new Date(session.startTime);
-            const durationMins = session.endTime
-              ? Math.max(1, Math.round((session.endTime - session.startTime) / 60000))
-              : 20;
-
-            await addManualSession({
-              dateStr: startDate.toISOString().slice(0, 10),
-              timeStr: startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }),
-              durationMinutes: durationMins,
+            await db.sessions.add({
+              startTime: session.startTime,
+              endTime: session.endTime,
               kickCount: session.kickCount,
               targetKicks: session.targetKicks,
+              status: 'completed',
               note: `${session.note ? session.note + ' • ' : ''}Синхронізовано від мами 🌸`
             });
 
@@ -385,7 +385,7 @@ class P2PSyncManager {
           try {
             const matchingSessions = await db.sessions
               .where('startTime')
-              .between(payload.deletedStartTime - 2000, payload.deletedStartTime + 2000)
+              .between(payload.deletedStartTime - 60000, payload.deletedStartTime + 60000)
               .toArray();
 
             for (const s of matchingSessions) {
@@ -419,32 +419,32 @@ class P2PSyncManager {
           let addedCount = 0;
           for (const sess of payload.historySessions) {
             try {
-              // Deduplication check: verify if session with same startTime already exists
+              // Deduplication check: check within 60s window and matching kickCount
               const existingCount = await db.sessions
                 .where('startTime')
-                .between(sess.startTime - 2000, sess.startTime + 2000)
+                .between(sess.startTime - 60000, sess.startTime + 60000)
+                .filter(s => s.kickCount === sess.kickCount)
                 .count();
 
               if (existingCount > 0) {
                 continue; // Skip duplicate!
               }
 
-              const startDate = new Date(sess.startTime);
-              const durationMins = sess.endTime
-                ? Math.max(1, Math.round((sess.endTime - sess.startTime) / 60000))
-                : 20;
-
-              await addManualSession({
-                dateStr: startDate.toISOString().slice(0, 10),
-                timeStr: startDate.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }),
-                durationMinutes: durationMins,
+              await db.sessions.add({
+                startTime: sess.startTime,
+                endTime: sess.endTime,
                 kickCount: sess.kickCount,
                 targetKicks: sess.targetKicks,
+                status: 'completed',
                 note: `${sess.note ? sess.note + ' • ' : ''}Історія мами 🌸`
               });
               addedCount++;
             } catch (_) {}
           }
+
+          // Cleanup any legacy duplicates created prior to this fix
+          await deduplicateSessions();
+
           if (this.onSessionReceivedCb && addedCount > 0) {
             this.onSessionReceivedCb(`Синхронізовано ${addedCount} нових сесій з історії мами!`);
           }
