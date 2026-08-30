@@ -2,9 +2,13 @@ import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, deleteSession, addManualSession, formatDuration, type Session } from '../db';
 import { p2pSyncManager } from '../utils/p2pSync';
-import { Calendar, Clock, Trash2, Tag, ChevronRight, CheckCircle2, XCircle, Plus, X } from 'lucide-react';
+import { Calendar, Clock, Trash2, Tag, ChevronRight, CheckCircle2, XCircle, Plus, X, ArrowLeft } from 'lucide-react';
 
-export const HistoryView: React.FC = () => {
+interface HistoryViewProps {
+  onBack?: () => void;
+}
+
+export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
   const [filter, setFilter] = useState<'all' | 'completed' | 'cancelled'>('all');
   const [expandedSessionId, setExpandedSessionId] = useState<number | null>(null);
   const [showManualModal, setShowManualModal] = useState<boolean>(false);
@@ -109,10 +113,22 @@ export const HistoryView: React.FC = () => {
       {/* Header & Actions */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center">
-            <Calendar className="w-5 h-5 text-rose-500 mr-2" />
-            Історія сесій
-          </h2>
+          <div className="flex items-center space-x-2">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="p-1.5 -ml-1 text-gray-500 hover:text-gray-900 dark:hover:text-white rounded-xl hover:bg-gray-100 dark:hover:bg-zinc-800 transition"
+                title="Назад до відліку"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            )}
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center">
+              <Calendar className="w-5 h-5 text-rose-500 mr-2" />
+              Історія сесій
+            </h2>
+          </div>
 
           <button
             type="button"

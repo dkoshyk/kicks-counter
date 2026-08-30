@@ -3,14 +3,19 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import confetti from 'canvas-confetti';
 import { db, startSession, recordKick, undoKick, finishSession, cancelSession, formatDuration } from '../db';
 import { p2pSyncManager, type LiveSessionState } from '../utils/p2pSync';
-import { Play, Plus, RotateCcw, CheckCircle2, Heart, Clock, Target, Info, Sparkles, Award, Bell } from 'lucide-react';
+import { Play, Plus, RotateCcw, CheckCircle2, Heart, Clock, Target, Info, Sparkles, Award, Bell, Calendar, BarChart3 } from 'lucide-react';
 
 interface SessionViewProps {
   defaultTargetKicks: number;
   userName?: string;
+  onOpenHistory?: () => void;
 }
 
-export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, userName = 'Діанка' }) => {
+export const SessionView: React.FC<SessionViewProps> = ({
+  defaultTargetKicks,
+  userName = 'Діанка',
+  onOpenHistory
+}) => {
   const [targetKicks, setTargetKicks] = useState<number>(defaultTargetKicks);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
   const [note, setNote] = useState<string>('');
@@ -271,6 +276,28 @@ export const SessionView: React.FC<SessionViewProps> = ({ defaultTargetKicks, us
             <Play className="w-6 h-6 fill-white" />
             <span>Розпочати відлік</span>
           </button>
+
+          {/* Quick Access to History & Analytics */}
+          {onOpenHistory && (
+            <button
+              type="button"
+              onClick={onOpenHistory}
+              className="w-full py-3 px-4 bg-white dark:bg-zinc-800/80 hover:bg-gray-50 dark:hover:bg-zinc-700/80 text-gray-800 dark:text-gray-200 font-bold text-sm rounded-2xl border border-gray-200/80 dark:border-zinc-700 shadow-sm active:scale-95 transition-all flex items-center justify-between"
+            >
+              <div className="flex items-center space-x-2.5">
+                <div className="p-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/50 text-rose-500">
+                  <Calendar className="w-4 h-4" />
+                </div>
+                <span className="text-left">
+                  <span className="block font-bold leading-tight">Історія та аналітика</span>
+                  <span className="block text-[11px] font-normal text-gray-400">Переглянути всі минулі сесії та графіки</span>
+                </span>
+              </div>
+              <div className="flex items-center space-x-1 text-xs text-rose-500 font-semibold">
+                <BarChart3 className="w-4 h-4" />
+              </div>
+            </button>
+          )}
 
           {/* Info Card */}
           <div className="w-full bg-rose-50 dark:bg-rose-950/30 p-4 rounded-2xl text-left flex items-start space-x-3 border border-rose-100 dark:border-rose-900/30">

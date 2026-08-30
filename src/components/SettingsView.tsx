@@ -4,7 +4,7 @@ import { Html5QrcodeScanner } from 'html5-qrcode';
 import { exportCSV, exportContractionsCSV, exportBackupJSON, importBackupJSON, clearAllData } from '../db';
 import { requestNotificationPermission, getNotificationPermissionState, triggerKickReminderNotification } from '../utils/notifications';
 import { p2pSyncManager } from '../utils/p2pSync';
-import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User, Users, QrCode, Camera, RefreshCw, X, Radio, Copy } from 'lucide-react';
+import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User, Users, QrCode, Camera, RefreshCw, X, Radio, Copy, Calendar, BarChart3 } from 'lucide-react';
 
 interface SettingsViewProps {
   defaultTargetKicks: number;
@@ -15,6 +15,7 @@ interface SettingsViewProps {
   onUpdateUserName: (name: string) => void;
   isDedicatedMode: boolean;
   onToggleDedicatedMode: () => void;
+  onOpenHistory?: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -25,7 +26,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   userName,
   onUpdateUserName,
   isDedicatedMode,
-  onToggleDedicatedMode
+  onToggleDedicatedMode,
+  onOpenHistory
 }) => {
   const [targetInput, setTargetInput] = useState<number>(defaultTargetKicks);
   const [nameInput, setNameInput] = useState<string>(userName);
@@ -305,6 +307,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* QUICK ACCESS: HISTORY & ANALYTICS */}
+      {onOpenHistory && (
+        <div className="bg-white dark:bg-[#1C1C1E] p-5 rounded-3xl border border-gray-100 dark:border-zinc-800/80 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 text-rose-500">
+                <Calendar className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900 dark:text-white">
+                  Журнал поштовхів та аналітика
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Повна історія записів, діаграми та середній час
+                </p>
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenHistory}
+            className="w-full py-3 px-4 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-md shadow-rose-500/20 active:scale-95 transition-all flex items-center justify-center space-x-2"
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Відкрити історію та графіки</span>
+          </button>
         </div>
       )}
 

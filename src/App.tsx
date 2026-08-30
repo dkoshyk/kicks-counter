@@ -108,6 +108,7 @@ export function App() {
             <SessionView
               defaultTargetKicks={defaultTargetKicks}
               userName={userName}
+              onOpenHistory={() => setActiveTab('history')}
             />
           </div>
         )}
@@ -122,7 +123,7 @@ export function App() {
         )}
         {activeTab === 'history' && (
           <div className="space-y-6">
-            <HistoryView />
+            <HistoryView onBack={() => setActiveTab('session')} />
             <AnalyticsView />
           </div>
         )}
@@ -136,6 +137,7 @@ export function App() {
             onUpdateUserName={handleUpdateUserName}
             isDedicatedMode={isDedicatedMode}
             onToggleDedicatedMode={handleToggleDedicatedMode}
+            onOpenHistory={() => setActiveTab('history')}
           />
         )}
       </main>
