@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import QRCode from 'qrcode';
 import { Html5QrcodeScanner } from 'html5-qrcode';
-import { exportCSV, exportBackupJSON, importBackupJSON, clearAllData } from '../db';
+import { exportCSV, exportContractionsCSV, exportBackupJSON, importBackupJSON, clearAllData } from '../db';
 import { requestNotificationPermission, getNotificationPermissionState, triggerKickReminderNotification } from '../utils/notifications';
 import { p2pSyncManager } from '../utils/p2pSync';
 import { Settings, Download, Upload, Trash2, ShieldCheck, HeartHandshake, Moon, Sun, Heart, Sparkles, Bell, CheckCircle2, AlertCircle, User, Users, QrCode, Camera, RefreshCw, X, Radio, Copy } from 'lucide-react';
@@ -646,7 +646,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             className="hidden"
           />
 
-          {/* Doctor CSV Export */}
+          {/* Doctor Kick CSV Export */}
           <button
             type="button"
             onClick={handleExportCSV}
@@ -654,7 +654,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             className="w-full py-3 px-4 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl shadow-md shadow-emerald-500/20 active:scale-95 transition-all flex items-center justify-center space-x-2"
           >
             <Download className="w-4 h-4" />
-            <span>Завантажити CSV для лікаря</span>
+            <span>Завантажити CSV поштовхів для лікаря</span>
+          </button>
+
+          {/* Doctor Contractions CSV Export */}
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const csvStr = await exportContractionsCSV();
+                const blob = new Blob([csvStr], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                const filename = `contractions_report_${new Date().toISOString().slice(0, 10)}.csv`;
+                link.setAttribute('href', url);
+                link.setAttribute('download', filename);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+                setExportMessage('Файл CSV переймів успішно збережено!');
+                setTimeout(() => setExportMessage(null), 4000);
+              } catch (err) {
+                console.error(err);
+                alert('Помилка при експорті переймів');
+              }
+            }}
+            className="w-full py-3 px-4 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl shadow-md shadow-rose-500/20 active:scale-95 transition-all flex items-center justify-center space-x-2"
+          >
+            <Download className="w-4 h-4" />
+            <span>Завантажити CSV переймів для лікаря</span>
           </button>
         </div>
 

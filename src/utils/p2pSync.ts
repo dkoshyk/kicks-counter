@@ -1,5 +1,14 @@
 import Peer, { type DataConnection } from 'peerjs';
-import { db, deleteSession, deduplicateSessions, type Session, type Kick } from '../db';
+import {
+  db,
+  deleteSession,
+  deduplicateSessions,
+  type Session,
+  type Kick,
+  type Contraction,
+  type BagItem,
+  type ShoppingItem
+} from '../db';
 
 export type Role = 'master' | 'slave' | 'none';
 
@@ -12,7 +21,22 @@ export interface LiveSessionState {
 }
 
 export interface P2PPayload {
-  type: 'PAIR_ACCEPT' | 'LIVE_SESSION_UPDATE' | 'SESSION_COMPLETED' | 'SESSION_DELETED' | 'REQUEST_HISTORY' | 'HISTORY_RESPONSE' | 'DISCONNECT' | 'PING' | 'PONG';
+  type:
+    | 'PAIR_ACCEPT'
+    | 'LIVE_SESSION_UPDATE'
+    | 'SESSION_COMPLETED'
+    | 'SESSION_DELETED'
+    | 'REQUEST_HISTORY'
+    | 'HISTORY_RESPONSE'
+    | 'CONTRACTION_SYNC'
+    | 'CONTRACTION_DELETED'
+    | 'BAG_ITEM_SYNC'
+    | 'BAG_ITEM_DELETED'
+    | 'SHOPPING_ITEM_SYNC'
+    | 'SHOPPING_ITEM_DELETED'
+    | 'DISCONNECT'
+    | 'PING'
+    | 'PONG';
   senderRole: Role;
   liveState?: LiveSessionState;
   completedSession?: {
@@ -20,7 +44,16 @@ export interface P2PPayload {
     kicks: Kick[];
   };
   historySessions?: Session[];
+  historyContractions?: Contraction[];
+  historyBagItems?: BagItem[];
+  historyShoppingItems?: ShoppingItem[];
   deletedStartTime?: number;
+  contraction?: Contraction;
+  deletedContractionStartTime?: number;
+  bagItem?: BagItem;
+  deletedBagItemName?: string;
+  shoppingItem?: ShoppingItem;
+  deletedShoppingItemTitle?: string;
 }
 
 class P2PSyncManager {
@@ -406,48 +439,235 @@ class P2PSyncManager {
             .equals('completed')
             .toArray();
 
+          const contractions = await db.contractions.toArray();
+          const bagItems = await db.bagItems.toArray();
+          const shoppingItems = await db.shoppingItems.toArray();
+
           this.sendPayload(conn, {
             type: 'HISTORY_RESPONSE',
             senderRole: 'master',
-            historySessions: completedSessions
+            historySessions: completedSessions,
+            historyContractions: contractions,
+            historyBagItems: bagItems,
+            historyShoppingItems: shoppingItems
           });
         }
         break;
 
       case 'HISTORY_RESPONSE':
-        if (this.role === 'slave' && payload.historySessions) {
+        if (this.role === 'slave') {
           let addedCount = 0;
-          for (const sess of payload.historySessions) {
-            try {
-              // Deduplication check: check within 60s window and matching kickCount
-              const existingCount = await db.sessions
-                .where('startTime')
-                .between(sess.startTime - 60000, sess.startTime + 60000)
-                .filter(s => s.kickCount === sess.kickCount)
-                .count();
 
-              if (existingCount > 0) {
-                continue; // Skip duplicate!
-              }
+          // 1. Sync Kick Sessions
+          if (payload.historySessions) {
+            for (const sess of payload.historySessions) {
+              try {
+                const existingCount = await db.sessions
+                  .where('startTime')
+                  .between(sess.startTime - 60000, sess.startTime + 60000)
+                  .filter(s => s.kickCount === sess.kickCount)
+                  .count();
 
-              await db.sessions.add({
-                startTime: sess.startTime,
-                endTime: sess.endTime,
-                kickCount: sess.kickCount,
-                targetKicks: sess.targetKicks,
-                status: 'completed',
-                note: `${sess.note ? sess.note + ' • ' : ''}Історія мами 🌸`
-              });
-              addedCount++;
-            } catch (_) {}
+                if (existingCount > 0) continue;
+
+                await db.sessions.add({
+                  startTime: sess.startTime,
+                  endTime: sess.endTime,
+                  kickCount: sess.kickCount,
+                  targetKicks: sess.targetKicks,
+                  status: 'completed',
+                  note: `${sess.note ? sess.note + ' • ' : ''}Історія мами 🌸`
+                });
+                addedCount++;
+              } catch (_) {}
+            }
+            await deduplicateSessions();
           }
 
-          // Cleanup any legacy duplicates created prior to this fix
-          await deduplicateSessions();
+          // 2. Sync Contractions
+          if (payload.historyContractions) {
+            for (const c of payload.historyContractions) {
+              try {
+                const exists = await db.contractions
+                  .where('startTime')
+                  .equals(c.startTime)
+                  .count();
+                if (exists === 0) {
+                  await db.contractions.add({
+                    startTime: c.startTime,
+                    endTime: c.endTime,
+                    duration: c.duration,
+                    interval: c.interval,
+                    restDuration: c.restDuration,
+                    intensity: c.intensity,
+                    notes: c.notes
+                  });
+                }
+              } catch (_) {}
+            }
+          }
+
+          // 3. Sync Hospital Bags
+          if (payload.historyBagItems) {
+            for (const bi of payload.historyBagItems) {
+              try {
+                const existing = await db.bagItems
+                  .where('name')
+                  .equals(bi.name)
+                  .first();
+                if (existing?.id) {
+                  await db.bagItems.update(existing.id, {
+                    isPacked: bi.isPacked,
+                    quantity: bi.quantity,
+                    notes: bi.notes
+                  });
+                }
+              } catch (_) {}
+            }
+          }
+
+          // 4. Sync Shopping Wishlist
+          if (payload.historyShoppingItems) {
+            for (const si of payload.historyShoppingItems) {
+              try {
+                const existing = await db.shoppingItems
+                  .where('title')
+                  .equals(si.title)
+                  .first();
+                if (!existing) {
+                  await db.shoppingItems.add({
+                    url: si.url,
+                    domain: si.domain,
+                    title: si.title,
+                    description: si.description,
+                    imageUrl: si.imageUrl,
+                    price: si.price,
+                    currency: si.currency,
+                    isBought: si.isBought,
+                    status: si.status,
+                    orderPlace: si.orderPlace,
+                    depositAmount: si.depositAmount,
+                    priority: si.priority,
+                    notes: si.notes,
+                    createdAt: si.createdAt
+                  });
+                } else if (existing.id) {
+                  await db.shoppingItems.update(existing.id, {
+                    isBought: si.isBought,
+                    status: si.status,
+                    orderPlace: si.orderPlace,
+                    depositAmount: si.depositAmount,
+                    price: si.price,
+                    notes: si.notes
+                  });
+                }
+              } catch (_) {}
+            }
+          }
 
           if (this.onSessionReceivedCb && addedCount > 0) {
-            this.onSessionReceivedCb(`Синхронізовано ${addedCount} нових сесій з історії мами!`);
+            this.onSessionReceivedCb(`Синхронізовано повні дані вагітності від мами! 🌸`);
           }
+        }
+        break;
+
+      case 'CONTRACTION_SYNC':
+        if (this.role === 'slave' && payload.contraction) {
+          try {
+            const c = payload.contraction;
+            const exists = await db.contractions.where('startTime').equals(c.startTime).first();
+            if (!exists) {
+              await db.contractions.add({
+                startTime: c.startTime,
+                endTime: c.endTime,
+                duration: c.duration,
+                interval: c.interval,
+                restDuration: c.restDuration,
+                intensity: c.intensity,
+                notes: c.notes
+              });
+              if (this.onSessionReceivedCb) {
+                this.onSessionReceivedCb(`Оновлено дані переймів від мами! ⏱️`);
+              }
+            }
+          } catch (_) {}
+        }
+        break;
+
+      case 'CONTRACTION_DELETED':
+        if (this.role === 'slave' && payload.deletedContractionStartTime) {
+          try {
+            const c = await db.contractions
+              .where('startTime')
+              .equals(payload.deletedContractionStartTime)
+              .first();
+            if (c?.id) {
+              await db.contractions.delete(c.id);
+            }
+          } catch (_) {}
+        }
+        break;
+
+      case 'BAG_ITEM_SYNC':
+        if (payload.bagItem) {
+          try {
+            const bi = payload.bagItem;
+            const existing = await db.bagItems.where('name').equals(bi.name).first();
+            if (existing?.id) {
+              await db.bagItems.update(existing.id, {
+                isPacked: bi.isPacked,
+                quantity: bi.quantity,
+                notes: bi.notes,
+                bagId: bi.bagId
+              });
+            } else {
+              await db.bagItems.add(bi);
+            }
+          } catch (_) {}
+        }
+        break;
+
+      case 'BAG_ITEM_DELETED':
+        if (payload.deletedBagItemName) {
+          try {
+            const existing = await db.bagItems.where('name').equals(payload.deletedBagItemName).first();
+            if (existing?.id) {
+              await db.bagItems.delete(existing.id);
+            }
+          } catch (_) {}
+        }
+        break;
+
+      case 'SHOPPING_ITEM_SYNC':
+        if (payload.shoppingItem) {
+          try {
+            const si = payload.shoppingItem;
+            const existing = await db.shoppingItems.where('title').equals(si.title).first();
+            if (existing?.id) {
+              await db.shoppingItems.update(existing.id, {
+                isBought: si.isBought,
+                status: si.status,
+                orderPlace: si.orderPlace,
+                depositAmount: si.depositAmount,
+                price: si.price,
+                imageUrl: si.imageUrl || existing.imageUrl,
+                notes: si.notes
+              });
+            } else {
+              await db.shoppingItems.add(si);
+            }
+          } catch (_) {}
+        }
+        break;
+
+      case 'SHOPPING_ITEM_DELETED':
+        if (payload.deletedShoppingItemTitle) {
+          try {
+            const existing = await db.shoppingItems.where('title').equals(payload.deletedShoppingItemTitle).first();
+            if (existing?.id) {
+              await db.shoppingItems.delete(existing.id);
+            }
+          } catch (_) {}
         }
         break;
 
@@ -494,6 +714,72 @@ class P2PSyncManager {
       type: 'SESSION_DELETED',
       senderRole: 'master',
       deletedStartTime: startTime
+    });
+  }
+
+  /**
+   * Broadcast new or completed contraction
+   */
+  public broadcastContraction(contraction: Contraction) {
+    this.broadcast({
+      type: 'CONTRACTION_SYNC',
+      senderRole: this.role,
+      contraction
+    });
+  }
+
+  /**
+   * Broadcast deleted contraction
+   */
+  public broadcastDeletedContraction(startTime: number) {
+    this.broadcast({
+      type: 'CONTRACTION_DELETED',
+      senderRole: this.role,
+      deletedContractionStartTime: startTime
+    });
+  }
+
+  /**
+   * Broadcast bag item change (packed, quantity, added)
+   */
+  public broadcastBagItem(bagItem: BagItem) {
+    this.broadcast({
+      type: 'BAG_ITEM_SYNC',
+      senderRole: this.role,
+      bagItem
+    });
+  }
+
+  /**
+   * Broadcast deleted bag item
+   */
+  public broadcastDeletedBagItem(name: string) {
+    this.broadcast({
+      type: 'BAG_ITEM_DELETED',
+      senderRole: this.role,
+      deletedBagItemName: name
+    });
+  }
+
+  /**
+   * Broadcast shopping item change (bought, added, edited)
+   */
+  public broadcastShoppingItem(shoppingItem: ShoppingItem) {
+    this.broadcast({
+      type: 'SHOPPING_ITEM_SYNC',
+      senderRole: this.role,
+      shoppingItem
+    });
+  }
+
+  /**
+   * Broadcast deleted shopping item
+   */
+  public broadcastDeletedShoppingItem(title: string) {
+    this.broadcast({
+      type: 'SHOPPING_ITEM_DELETED',
+      senderRole: this.role,
+      deletedShoppingItemTitle: title
     });
   }
 

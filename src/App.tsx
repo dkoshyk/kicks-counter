@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react';
-import { Activity, Calendar, BarChart3, Settings, Heart } from 'lucide-react';
+import { Activity, Flame, ShoppingBag, ShoppingCart, Settings, Heart } from 'lucide-react';
 import { SessionView } from './components/SessionView';
 import { HistoryView } from './components/HistoryView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { SettingsView } from './components/SettingsView';
+import { ContractionTimerView } from './components/ContractionTimerView';
+import { HospitalBagsView } from './components/HospitalBagsView';
+import { ShoppingWishlistView } from './components/ShoppingWishlistView';
 
-export type TabType = 'session' | 'history' | 'analytics' | 'settings';
+export type TabType = 'session' | 'contractions' | 'bags' | 'shopping' | 'history' | 'settings';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('session');
@@ -84,14 +87,16 @@ export function App() {
                 </span>
               ) : (
                 <span className="text-[10px] font-semibold text-gray-500 dark:text-gray-400 block leading-tight mt-0.5">
-                  {userName ? `Кабінет: ${userName}` : 'Лічильник поштовхів'}
+                  {userName ? `Кабінет: ${userName}` : 'Вагітність та малюк'}
                 </span>
               )}
             </div>
           </div>
 
-          <div className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 dark:bg-zinc-800/80 text-gray-600 dark:text-gray-300 border border-gray-200/50 dark:border-zinc-700/50">
-            {getFormattedDate()}
+          <div className="flex items-center space-x-2">
+            <div className="text-xs font-semibold px-3 py-1 rounded-full bg-gray-100 dark:bg-zinc-800/80 text-gray-600 dark:text-gray-300 border border-gray-200/50 dark:border-zinc-700/50">
+              {getFormattedDate()}
+            </div>
           </div>
         </div>
       </header>
@@ -99,13 +104,28 @@ export function App() {
       {/* MAIN CONTENT AREA */}
       <main className="flex-1 w-full pt-4 pb-24">
         {activeTab === 'session' && (
-          <SessionView
-            defaultTargetKicks={defaultTargetKicks}
-            userName={userName}
-          />
+          <div className="space-y-4">
+            <SessionView
+              defaultTargetKicks={defaultTargetKicks}
+              userName={userName}
+            />
+          </div>
         )}
-        {activeTab === 'history' && <HistoryView />}
-        {activeTab === 'analytics' && <AnalyticsView />}
+        {activeTab === 'contractions' && (
+          <ContractionTimerView />
+        )}
+        {activeTab === 'bags' && (
+          <HospitalBagsView />
+        )}
+        {activeTab === 'shopping' && (
+          <ShoppingWishlistView />
+        )}
+        {activeTab === 'history' && (
+          <div className="space-y-6">
+            <HistoryView />
+            <AnalyticsView />
+          </div>
+        )}
         {activeTab === 'settings' && (
           <SettingsView
             defaultTargetKicks={defaultTargetKicks}
@@ -120,9 +140,10 @@ export function App() {
         )}
       </main>
 
-      {/* FROSTED BOTTOM TAB BAR */}
+      {/* FROSTED BOTTOM TAB BAR (5 SECTIONS) */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 pb-safe ios-glass dark:ios-glass-dark border-t border-gray-200/60 dark:border-zinc-800/60">
-        <div className="max-w-md mx-auto h-16 grid grid-cols-4 px-2">
+        <div className="max-w-md mx-auto h-16 grid grid-cols-5 px-1">
+          {/* TAB 1: ПОШТОВХИ */}
           <button
             type="button"
             onClick={() => setActiveTab('session')}
@@ -133,35 +154,52 @@ export function App() {
             }`}
           >
             <Activity className="w-5 h-5" />
-            <span className="text-[11px]">Сесія</span>
+            <span className="text-[10px] tracking-tight">Поштовхи</span>
           </button>
 
+          {/* TAB 2: ПЕРЕЙМИ */}
           <button
             type="button"
-            onClick={() => setActiveTab('history')}
+            onClick={() => setActiveTab('contractions')}
             className={`flex flex-col items-center justify-center space-y-1 transition-transform duration-150 active:scale-95 ${
-              activeTab === 'history'
+              activeTab === 'contractions'
                 ? 'text-rose-500 font-bold'
                 : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 font-medium'
             }`}
           >
-            <Calendar className="w-5 h-5" />
-            <span className="text-[11px]">Історія</span>
+            <Flame className="w-5 h-5" />
+            <span className="text-[10px] tracking-tight">Перейми</span>
           </button>
 
+          {/* TAB 3: СУМКИ */}
           <button
             type="button"
-            onClick={() => setActiveTab('analytics')}
+            onClick={() => setActiveTab('bags')}
             className={`flex flex-col items-center justify-center space-y-1 transition-transform duration-150 active:scale-95 ${
-              activeTab === 'analytics'
+              activeTab === 'bags'
                 ? 'text-rose-500 font-bold'
                 : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 font-medium'
             }`}
           >
-            <BarChart3 className="w-5 h-5" />
-            <span className="text-[11px]">Аналітика</span>
+            <ShoppingBag className="w-5 h-5" />
+            <span className="text-[10px] tracking-tight">Сумки</span>
           </button>
 
+          {/* TAB 4: ПОКУПКИ */}
+          <button
+            type="button"
+            onClick={() => setActiveTab('shopping')}
+            className={`flex flex-col items-center justify-center space-y-1 transition-transform duration-150 active:scale-95 ${
+              activeTab === 'shopping'
+                ? 'text-rose-500 font-bold'
+                : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 font-medium'
+            }`}
+          >
+            <ShoppingCart className="w-5 h-5" />
+            <span className="text-[10px] tracking-tight">Покупки</span>
+          </button>
+
+          {/* TAB 5: НАЛАШТУВАННЯ */}
           <button
             type="button"
             onClick={() => setActiveTab('settings')}
@@ -172,7 +210,7 @@ export function App() {
             }`}
           >
             <Settings className="w-5 h-5" />
-            <span className="text-[11px]">Налаштування</span>
+            <span className="text-[10px] tracking-tight">Ще</span>
           </button>
         </div>
       </nav>
