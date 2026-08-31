@@ -7,6 +7,7 @@ import { SettingsView } from './components/SettingsView';
 import { ContractionTimerView } from './components/ContractionTimerView';
 import { HospitalBagsView } from './components/HospitalBagsView';
 import { ShoppingWishlistView } from './components/ShoppingWishlistView';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 export type TabType = 'session' | 'contractions' | 'bags' | 'shopping' | 'history' | 'settings';
 
@@ -105,40 +106,57 @@ export function App() {
       <main className="flex-1 w-full pt-4 pb-24">
         {activeTab === 'session' && (
           <div className="space-y-4">
-            <SessionView
-              defaultTargetKicks={defaultTargetKicks}
-              userName={userName}
-              onOpenHistory={() => setActiveTab('history')}
-            />
+            <ErrorBoundary moduleName="Лічильник поштовхів">
+              <SessionView
+                defaultTargetKicks={defaultTargetKicks}
+                userName={userName}
+                onOpenHistory={() => setActiveTab('history')}
+              />
+            </ErrorBoundary>
           </div>
         )}
         {activeTab === 'contractions' && (
-          <ContractionTimerView />
+          <ErrorBoundary moduleName="Перейми">
+            <ContractionTimerView
+              onOpenBags={() => setActiveTab('bags')}
+              onCallHospital={() => {
+                window.location.href = 'tel:103';
+              }}
+            />
+          </ErrorBoundary>
         )}
         {activeTab === 'bags' && (
-          <HospitalBagsView />
+          <ErrorBoundary moduleName="Сумка в пологовий">
+            <HospitalBagsView />
+          </ErrorBoundary>
         )}
         {activeTab === 'shopping' && (
-          <ShoppingWishlistView />
+          <ErrorBoundary moduleName="Покупки">
+            <ShoppingWishlistView />
+          </ErrorBoundary>
         )}
         {activeTab === 'history' && (
           <div className="space-y-6">
-            <HistoryView onBack={() => setActiveTab('session')} />
-            <AnalyticsView />
+            <ErrorBoundary moduleName="Історія">
+              <HistoryView onBack={() => setActiveTab('session')} />
+              <AnalyticsView />
+            </ErrorBoundary>
           </div>
         )}
         {activeTab === 'settings' && (
-          <SettingsView
-            defaultTargetKicks={defaultTargetKicks}
-            onUpdateDefaultTarget={handleUpdateDefaultTarget}
-            darkMode={darkMode}
-            onToggleDarkMode={() => setDarkMode(!darkMode)}
-            userName={userName}
-            onUpdateUserName={handleUpdateUserName}
-            isDedicatedMode={isDedicatedMode}
-            onToggleDedicatedMode={handleToggleDedicatedMode}
-            onOpenHistory={() => setActiveTab('history')}
-          />
+          <ErrorBoundary moduleName="Налаштування">
+            <SettingsView
+              defaultTargetKicks={defaultTargetKicks}
+              onUpdateDefaultTarget={handleUpdateDefaultTarget}
+              darkMode={darkMode}
+              onToggleDarkMode={() => setDarkMode(!darkMode)}
+              userName={userName}
+              onUpdateUserName={handleUpdateUserName}
+              isDedicatedMode={isDedicatedMode}
+              onToggleDedicatedMode={handleToggleDedicatedMode}
+              onOpenHistory={() => setActiveTab('history')}
+            />
+          </ErrorBoundary>
         )}
       </main>
 

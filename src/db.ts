@@ -509,7 +509,8 @@ export async function startContraction(): Promise<number> {
 export async function stopContraction(
   id: number,
   intensity?: 'mild' | 'moderate' | 'strong',
-  notes?: string
+  notes?: string,
+  isFalseAlarm?: boolean
 ): Promise<void> {
   const contraction = await db.contractions.get(id);
   if (!contraction) return;
@@ -521,7 +522,8 @@ export async function stopContraction(
     endTime: now,
     duration,
     intensity: intensity || contraction.intensity || 'moderate',
-    notes: notes?.trim() || undefined
+    notes: notes?.trim() || undefined,
+    ...(isFalseAlarm !== undefined ? { isFalseAlarm } : {})
   });
 }
 
@@ -533,6 +535,7 @@ export async function addManualContraction(params: {
   durationSeconds: number;
   intensity?: 'mild' | 'moderate' | 'strong';
   notes?: string;
+  isFalseAlarm?: boolean;
 }): Promise<number> {
   const endTime = params.startTime + params.durationSeconds * 1000;
   
@@ -561,10 +564,15 @@ export async function addManualContraction(params: {
     interval,
     restDuration,
     intensity: params.intensity || 'moderate',
-    notes: params.notes?.trim() || undefined
+    notes: params.notes?.trim() || undefined,
+    isFalseAlarm: params.isFalseAlarm
   });
 
   return id as number;
+}
+
+export async function updateContraction(id: number, changes: Partial<Contraction>): Promise<void> {
+  await db.contractions.update(id, changes);
 }
 
 export async function deleteContraction(id: number): Promise<void> {
@@ -580,7 +588,7 @@ export async function clearAllContractions(): Promise<void> {
  */
 export async function exportContractionsCSV(): Promise<string> {
   const list = await db.contractions.orderBy('startTime').toArray();
-  const headers = ['Дата', 'Час початку', 'Тривалість (сек)', 'Інтервал (хв)', 'Інтенсивність', 'Нотатки'];
+  const headers = ['Дата', 'Час початку', 'Тривалість (сек)', 'Інтервал (хв)', 'Інтенсивність', 'Тип перейми', 'Нотатки'];
 
   const rows = list.map(c => {
     const d = new Date(c.startTime);
@@ -590,9 +598,10 @@ export async function exportContractionsCSV(): Promise<string> {
     const interval = c.interval ? `${Math.floor(c.interval / 60)} хв ${c.interval % 60} с` : '-';
     const intensityMap = { mild: 'Легка', moderate: 'Середня', strong: 'Сильна' };
     const intensity = c.intensity ? intensityMap[c.intensity] : '-';
+    const typeStr = c.isFalseAlarm ? 'Хибна (Брекстон-Гікс)' : 'Справжня';
     const note = c.notes ? `"${c.notes.replace(/"/g, '""')}"` : '';
 
-    return [dateStr, timeStr, duration, interval, intensity, note].join(',');
+    return [dateStr, timeStr, duration, interval, intensity, typeStr, note].join(',');
   });
 
   return '\uFEFF' + [headers.join(','), ...rows].join('\n');

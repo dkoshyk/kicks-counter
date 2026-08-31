@@ -31,7 +31,14 @@ import { fetchLinkMetadata } from '../utils/linkPreview';
 import { p2pSyncManager } from '../utils/p2pSync';
 
 export function ShoppingWishlistView() {
-  const items = useLiveQuery(() => db.shoppingItems.orderBy('createdAt').reverse().toArray(), []);
+  const items = useLiveQuery(async () => {
+    try {
+      const list = await db.shoppingItems.toArray();
+      return list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    } catch {
+      return [];
+    }
+  }, []);
 
   const [inputUrl, setInputUrl] = useState('');
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
@@ -77,12 +84,13 @@ export function ShoppingWishlistView() {
     let deposits = 0;
 
     for (const it of items) {
-      const price = it.price || 0;
+      const price = typeof it.price === 'number' && !isNaN(it.price) ? it.price : 0;
+      const deposit = typeof it.depositAmount === 'number' && !isNaN(it.depositAmount) ? it.depositAmount : 0;
       total += price;
       if (it.isBought || it.status === 'bought') {
         bought += price;
-      } else if (it.depositAmount) {
-        deposits += it.depositAmount;
+      } else if (deposit > 0) {
+        deposits += deposit;
       }
     }
 
@@ -102,31 +110,41 @@ export function ShoppingWishlistView() {
     setIsLoadingPreview(true);
     try {
       const meta = await fetchLinkMetadata(url);
-
       setModalUrl(meta.url);
-      setModalTitle(meta.title);
+      setModalTitle(meta.title || '');
       setModalDescription(meta.description || '');
       setModalImageUrl(meta.imageUrl || '');
-      setModalPrice(meta.price ? meta.price.toString() : '');
+      setModalPrice(meta.price !== undefined ? meta.price.toString() : '');
       setModalCurrency(meta.currency || 'UAH');
-      setModalDomain(meta.domain);
+      setModalDomain(meta.domain || '');
       setModalPriority('medium');
       setModalNotes('');
-
-      setInputUrl('');
+      setModalStatus('planned');
+      setModalOrderPlace('');
+      setModalDepositAmount('');
       setShowAddModal(true);
+      setInputUrl('');
     } catch (err) {
-      console.error('Failed to parse URL:', err);
-      // Open modal anyway for manual typing
+      console.error('Failed to fetch link info:', err);
+      // Fallback modal open
       setModalUrl(url);
-      setModalTitle('Новий товар');
+      setModalTitle('');
+      setModalDescription('');
+      setModalImageUrl('');
+      setModalPrice('');
+      setModalCurrency('UAH');
+      setModalDomain('');
+      setModalPriority('medium');
+      setModalNotes('');
+      setModalStatus('planned');
+      setModalOrderPlace('');
+      setModalDepositAmount('');
       setShowAddModal(true);
     } finally {
       setIsLoadingPreview(false);
     }
   };
 
-  // Paste from clipboard
   const handlePasteClipboard = async () => {
     try {
       if (navigator.clipboard && navigator.clipboard.readText) {
@@ -271,8 +289,8 @@ export function ShoppingWishlistView() {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter(
         i =>
-          i.title.toLowerCase().includes(q) ||
-          i.domain.toLowerCase().includes(q) ||
+          (i.title || '').toLowerCase().includes(q) ||
+          (i.domain || '').toLowerCase().includes(q) ||
           (i.orderPlace && i.orderPlace.toLowerCase().includes(q)) ||
           (i.notes && i.notes.toLowerCase().includes(q))
       );
@@ -289,18 +307,19 @@ export function ShoppingWishlistView() {
 
     // Sort
     if (sortBy === 'priceAsc') {
-      list.sort((a, b) => (a.price || 0) - (b.price || 0));
+      list.sort((a, b) => (typeof a.price === 'number' && !isNaN(a.price) ? a.price : 0) - (typeof b.price === 'number' && !isNaN(b.price) ? b.price : 0));
     } else if (sortBy === 'priceDesc') {
-      list.sort((a, b) => (b.price || 0) - (a.price || 0));
+      list.sort((a, b) => (typeof b.price === 'number' && !isNaN(b.price) ? b.price : 0) - (typeof a.price === 'number' && !isNaN(a.price) ? a.price : 0));
     } else {
-      list.sort((a, b) => b.createdAt - a.createdAt);
+      list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     }
 
     return list;
   }, [items, searchQuery, filterStatus, sortBy]);
 
-  const formatMoney = (val: number, cur = '₴') => {
-    return `${val.toLocaleString('uk-UA')} ${cur === 'UAH' ? '₴' : cur}`;
+  const formatMoney = (val?: number | null, cur = '₴') => {
+    const num = typeof val === 'number' && !isNaN(val) ? val : 0;
+    return `${num.toLocaleString('uk-UA')} ${cur === 'UAH' ? '₴' : (cur || '₴')}`;
   };
 
   return (
@@ -544,7 +563,7 @@ export function ShoppingWishlistView() {
                       <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
                         {item.domain}
                       </span>
-                      {item.price !== undefined && (
+                      {item.price !== undefined && item.price !== null && !isNaN(item.price) && (
                         <span className="font-extrabold text-sm text-rose-600 dark:text-rose-400">
                           {formatMoney(item.price, item.currency)}
                         </span>
@@ -566,7 +585,7 @@ export function ShoppingWishlistView() {
                     )}
 
                     {/* Order & Deposit Badges */}
-                    {(item.status === 'ordered' || item.orderPlace || item.depositAmount) && (
+                    {(item.status === 'ordered' || item.orderPlace || (item.depositAmount != null && item.depositAmount > 0)) && (
                       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {item.status === 'ordered' && (
                           <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 font-bold text-[10px] border border-amber-200/50 dark:border-amber-800/40">
@@ -579,7 +598,7 @@ export function ShoppingWishlistView() {
                             📍 {item.orderPlace}
                           </span>
                         )}
-                        {item.depositAmount !== undefined && item.depositAmount > 0 && (
+                        {item.depositAmount !== undefined && item.depositAmount !== null && !isNaN(item.depositAmount) && item.depositAmount > 0 && (
                           <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 px-1.5 py-0.5 rounded-md border border-indigo-200/40">
                             Завдаток: {formatMoney(item.depositAmount, item.currency)}
                           </span>

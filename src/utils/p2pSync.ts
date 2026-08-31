@@ -488,11 +488,11 @@ class P2PSyncManager {
           if (payload.historyContractions) {
             for (const c of payload.historyContractions) {
               try {
-                const exists = await db.contractions
+                const existing = await db.contractions
                   .where('startTime')
                   .equals(c.startTime)
-                  .count();
-                if (exists === 0) {
+                  .first();
+                if (!existing) {
                   await db.contractions.add({
                     startTime: c.startTime,
                     endTime: c.endTime,
@@ -500,7 +500,18 @@ class P2PSyncManager {
                     interval: c.interval,
                     restDuration: c.restDuration,
                     intensity: c.intensity,
-                    notes: c.notes
+                    notes: c.notes,
+                    isFalseAlarm: c.isFalseAlarm
+                  });
+                } else if (existing.id) {
+                  await db.contractions.update(existing.id, {
+                    endTime: c.endTime,
+                    duration: c.duration,
+                    interval: c.interval,
+                    restDuration: c.restDuration,
+                    intensity: c.intensity,
+                    notes: c.notes,
+                    isFalseAlarm: c.isFalseAlarm
                   });
                 }
               } catch (_) {}
@@ -530,35 +541,39 @@ class P2PSyncManager {
           if (payload.historyShoppingItems) {
             for (const si of payload.historyShoppingItems) {
               try {
+                if (!si.title) continue;
                 const existing = await db.shoppingItems
                   .where('title')
                   .equals(si.title)
                   .first();
                 if (!existing) {
                   await db.shoppingItems.add({
-                    url: si.url,
-                    domain: si.domain,
+                    url: si.url || '',
+                    domain: si.domain || '',
                     title: si.title,
-                    description: si.description,
-                    imageUrl: si.imageUrl,
-                    price: si.price,
-                    currency: si.currency,
-                    isBought: si.isBought,
-                    status: si.status,
-                    orderPlace: si.orderPlace,
-                    depositAmount: si.depositAmount,
-                    priority: si.priority,
-                    notes: si.notes,
-                    createdAt: si.createdAt
+                    description: si.description || undefined,
+                    imageUrl: si.imageUrl || undefined,
+                    price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
+                    currency: si.currency || 'UAH',
+                    isBought: Boolean(si.isBought),
+                    status: si.status || (si.isBought ? 'bought' : 'planned'),
+                    orderPlace: si.orderPlace || '',
+                    depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
+                    priority: si.priority || 'medium',
+                    notes: si.notes || '',
+                    createdAt: typeof si.createdAt === 'number' && !isNaN(si.createdAt) ? si.createdAt : Date.now()
                   });
                 } else if (existing.id) {
                   await db.shoppingItems.update(existing.id, {
-                    isBought: si.isBought,
-                    status: si.status,
-                    orderPlace: si.orderPlace,
-                    depositAmount: si.depositAmount,
-                    price: si.price,
-                    notes: si.notes
+                    isBought: Boolean(si.isBought),
+                    status: si.status || (si.isBought ? 'bought' : 'planned'),
+                    orderPlace: si.orderPlace || '',
+                    depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
+                    price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
+                    currency: si.currency || existing.currency || 'UAH',
+                    imageUrl: si.imageUrl || existing.imageUrl,
+                    notes: si.notes || existing.notes,
+                    priority: si.priority || existing.priority || 'medium'
                   });
                 }
               } catch (_) {}
@@ -575,8 +590,8 @@ class P2PSyncManager {
         if (this.role === 'slave' && payload.contraction) {
           try {
             const c = payload.contraction;
-            const exists = await db.contractions.where('startTime').equals(c.startTime).first();
-            if (!exists) {
+            const existing = await db.contractions.where('startTime').equals(c.startTime).first();
+            if (!existing) {
               await db.contractions.add({
                 startTime: c.startTime,
                 endTime: c.endTime,
@@ -584,11 +599,22 @@ class P2PSyncManager {
                 interval: c.interval,
                 restDuration: c.restDuration,
                 intensity: c.intensity,
-                notes: c.notes
+                notes: c.notes,
+                isFalseAlarm: c.isFalseAlarm
               });
               if (this.onSessionReceivedCb) {
                 this.onSessionReceivedCb(`Оновлено дані переймів від мами! ⏱️`);
               }
+            } else if (existing.id) {
+              await db.contractions.update(existing.id, {
+                endTime: c.endTime,
+                duration: c.duration,
+                interval: c.interval,
+                restDuration: c.restDuration,
+                intensity: c.intensity,
+                notes: c.notes,
+                isFalseAlarm: c.isFalseAlarm
+              });
             }
           } catch (_) {}
         }
@@ -612,18 +638,30 @@ class P2PSyncManager {
         if (payload.bagItem) {
           try {
             const bi = payload.bagItem;
-            const existing = await db.bagItems.where('name').equals(bi.name).first();
-            if (existing?.id) {
-              await db.bagItems.update(existing.id, {
-                isPacked: bi.isPacked,
-                quantity: bi.quantity,
-                notes: bi.notes,
-                bagId: bi.bagId
-              });
-            } else {
-              await db.bagItems.add(bi);
+            if (bi.name) {
+              const existing = await db.bagItems.where('name').equals(bi.name).first();
+              if (existing?.id) {
+                await db.bagItems.update(existing.id, {
+                  isPacked: Boolean(bi.isPacked),
+                  quantity: typeof bi.quantity === 'number' ? bi.quantity : (Number(bi.quantity) || 1),
+                  notes: bi.notes || undefined,
+                  bagId: typeof bi.bagId === 'number' ? bi.bagId : existing.bagId
+                });
+              } else {
+                const bagIdNum = typeof bi.bagId === 'number' ? bi.bagId : (Number(bi.bagId) || 1);
+                await db.bagItems.add({
+                  bagId: bagIdNum,
+                  name: bi.name,
+                  isPacked: Boolean(bi.isPacked),
+                  quantity: typeof bi.quantity === 'number' ? bi.quantity : (Number(bi.quantity) || 1),
+                  notes: bi.notes || undefined,
+                  order: typeof bi.order === 'number' ? bi.order : Date.now()
+                });
+              }
             }
-          } catch (_) {}
+          } catch (err) {
+            console.error('Failed to sync bag item:', err);
+          }
         }
         break;
 
@@ -642,21 +680,42 @@ class P2PSyncManager {
         if (payload.shoppingItem) {
           try {
             const si = payload.shoppingItem;
-            const existing = await db.shoppingItems.where('title').equals(si.title).first();
-            if (existing?.id) {
-              await db.shoppingItems.update(existing.id, {
-                isBought: si.isBought,
-                status: si.status,
-                orderPlace: si.orderPlace,
-                depositAmount: si.depositAmount,
-                price: si.price,
-                imageUrl: si.imageUrl || existing.imageUrl,
-                notes: si.notes
-              });
-            } else {
-              await db.shoppingItems.add(si);
+            if (si.title) {
+              const existing = await db.shoppingItems.where('title').equals(si.title).first();
+              if (existing?.id) {
+                await db.shoppingItems.update(existing.id, {
+                  isBought: Boolean(si.isBought),
+                  status: si.status || (si.isBought ? 'bought' : 'planned'),
+                  orderPlace: si.orderPlace || '',
+                  depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
+                  price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
+                  currency: si.currency || existing.currency || 'UAH',
+                  imageUrl: si.imageUrl || existing.imageUrl,
+                  notes: si.notes || '',
+                  priority: si.priority || existing.priority || 'medium'
+                });
+              } else {
+                await db.shoppingItems.add({
+                  url: si.url || '',
+                  domain: si.domain || '',
+                  title: si.title,
+                  description: si.description || undefined,
+                  imageUrl: si.imageUrl || undefined,
+                  price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
+                  currency: si.currency || 'UAH',
+                  isBought: Boolean(si.isBought),
+                  status: si.status || (si.isBought ? 'bought' : 'planned'),
+                  orderPlace: si.orderPlace || '',
+                  depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
+                  priority: si.priority || 'medium',
+                  notes: si.notes || '',
+                  createdAt: typeof si.createdAt === 'number' && !isNaN(si.createdAt) ? si.createdAt : Date.now()
+                });
+              }
             }
-          } catch (_) {}
+          } catch (err) {
+            console.error('Failed to sync shopping item:', err);
+          }
         }
         break;
 
