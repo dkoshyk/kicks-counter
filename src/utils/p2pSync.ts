@@ -65,10 +65,11 @@ class P2PSyncManager {
   private reconnectInterval: any = null;
   private heartbeatInterval: any = null;
   
-  // Callbacks
+  // Callbacks & listeners
   private onLiveUpdateCb: ((state: LiveSessionState | null) => void) | null = null;
   private onStatusChangeCb: ((status: string, connectedCount: number) => void) | null = null;
   private onSessionReceivedCb: ((message: string) => void) | null = null;
+  private sessionReceivedListeners: Set<(message: string) => void> = new Set();
 
   constructor() {
     // Listen to network online event
@@ -90,6 +91,20 @@ class P2PSyncManager {
 
     // Start periodic background keep-alive check
     this.startHeartbeat();
+  }
+
+  /**
+   * Broadcast a toast notification to all listeners
+   */
+  public notifySessionReceived(message: string) {
+    if (this.onSessionReceivedCb) {
+      this.onSessionReceivedCb(message);
+    }
+    this.sessionReceivedListeners.forEach((listener) => {
+      try {
+        listener(message);
+      } catch (_) {}
+    });
   }
 
   /**
@@ -271,7 +286,7 @@ class P2PSyncManager {
           reliable: true
         });
 
-        conn.on('open', () => {
+        conn.on('open', async () => {
           this.setupConnection(conn);
           this.updateStatus('Підключено до мами 🟢', 1);
 
@@ -280,11 +295,27 @@ class P2PSyncManager {
             this.reconnectInterval = null;
           }
 
-          // Request full history upon initial pair
-          this.sendPayload(conn, {
-            type: 'REQUEST_HISTORY',
-            senderRole: 'slave'
-          });
+          // Request full history from Mom and send Dad's local wishlist & bag items
+          try {
+            const [localShopping, localBags, localContractions] = await Promise.all([
+              db.shoppingItems.toArray(),
+              db.bagItems.toArray(),
+              db.contractions.toArray()
+            ]);
+
+            this.sendPayload(conn, {
+              type: 'REQUEST_HISTORY',
+              senderRole: 'slave',
+              historyShoppingItems: localShopping,
+              historyBagItems: localBags,
+              historyContractions: localContractions
+            });
+          } catch (_) {
+            this.sendPayload(conn, {
+              type: 'REQUEST_HISTORY',
+              senderRole: 'slave'
+            });
+          }
 
           resolve(true);
         });
@@ -362,6 +393,135 @@ class P2PSyncManager {
   }
 
   /**
+   * Safe DB merger for Shopping Items (Two-Way Mom <-> Dad)
+   */
+  public async syncShoppingItemIntoDb(si: ShoppingItem): Promise<{ action: 'added' | 'updated' | 'none'; title: string }> {
+    if (!si.title || !si.title.trim()) return { action: 'none', title: '' };
+    const cleanTitle = si.title.trim();
+
+    try {
+      let existing = await db.shoppingItems.where('title').equalsIgnoreCase(cleanTitle).first();
+      if (!existing && si.url && si.url !== '#') {
+        existing = await db.shoppingItems.where('url').equals(si.url).first();
+      }
+
+      if (existing?.id) {
+        await db.shoppingItems.update(existing.id, {
+          title: cleanTitle,
+          isBought: Boolean(si.isBought),
+          status: si.status || (si.isBought ? 'bought' : 'planned'),
+          orderPlace: si.orderPlace !== undefined ? si.orderPlace : (existing.orderPlace || ''),
+          depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : existing.depositAmount,
+          price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : existing.price,
+          currency: si.currency || existing.currency || 'UAH',
+          imageUrl: si.imageUrl !== undefined ? si.imageUrl : existing.imageUrl,
+          notes: si.notes !== undefined ? si.notes : (existing.notes || ''),
+          priority: si.priority || existing.priority || 'medium',
+          url: si.url || existing.url || '',
+          domain: si.domain || existing.domain || '',
+          description: si.description !== undefined ? si.description : existing.description
+        });
+        return { action: 'updated', title: cleanTitle };
+      } else {
+        await db.shoppingItems.add({
+          url: si.url || '',
+          domain: si.domain || '',
+          title: cleanTitle,
+          description: si.description || undefined,
+          imageUrl: si.imageUrl || undefined,
+          price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
+          currency: si.currency || 'UAH',
+          isBought: Boolean(si.isBought),
+          status: si.status || (si.isBought ? 'bought' : 'planned'),
+          orderPlace: si.orderPlace || '',
+          depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
+          priority: si.priority || 'medium',
+          notes: si.notes || '',
+          createdAt: typeof si.createdAt === 'number' && !isNaN(si.createdAt) ? si.createdAt : Date.now()
+        });
+        return { action: 'added', title: cleanTitle };
+      }
+    } catch (err) {
+      console.error('Failed to sync shopping item into DB:', err);
+      return { action: 'none', title: cleanTitle };
+    }
+  }
+
+  /**
+   * Safe DB merger for Hospital Bag Items (Two-Way Mom <-> Dad)
+   */
+  public async syncBagItemIntoDb(bi: BagItem): Promise<{ action: 'added' | 'updated' | 'none'; name: string }> {
+    if (!bi.name || !bi.name.trim()) return { action: 'none', name: '' };
+    const cleanName = bi.name.trim();
+
+    try {
+      const existing = await db.bagItems.where('name').equalsIgnoreCase(cleanName).first();
+      if (existing?.id) {
+        await db.bagItems.update(existing.id, {
+          isPacked: Boolean(bi.isPacked),
+          quantity: typeof bi.quantity === 'number' ? bi.quantity : (Number(bi.quantity) || 1),
+          notes: bi.notes !== undefined ? bi.notes : existing.notes,
+          bagId: typeof bi.bagId === 'number' ? bi.bagId : existing.bagId
+        });
+        return { action: 'updated', name: cleanName };
+      } else {
+        const bagIdNum = typeof bi.bagId === 'number' ? bi.bagId : (Number(bi.bagId) || 1);
+        await db.bagItems.add({
+          bagId: bagIdNum,
+          name: cleanName,
+          isPacked: Boolean(bi.isPacked),
+          quantity: typeof bi.quantity === 'number' ? bi.quantity : (Number(bi.quantity) || 1),
+          notes: bi.notes || undefined,
+          order: typeof bi.order === 'number' ? bi.order : Date.now()
+        });
+        return { action: 'added', name: cleanName };
+      }
+    } catch (err) {
+      console.error('Failed to sync bag item into DB:', err);
+      return { action: 'none', name: cleanName };
+    }
+  }
+
+  /**
+   * Safe DB merger for Contractions (Two-Way Mom <-> Dad)
+   */
+  public async syncContractionIntoDb(c: Contraction): Promise<{ action: 'added' | 'updated' | 'none' }> {
+    if (!c.startTime) return { action: 'none' };
+
+    try {
+      const existing = await db.contractions.where('startTime').equals(c.startTime).first();
+      if (!existing) {
+        await db.contractions.add({
+          startTime: c.startTime,
+          endTime: c.endTime,
+          duration: c.duration,
+          interval: c.interval,
+          restDuration: c.restDuration,
+          intensity: c.intensity,
+          notes: c.notes,
+          isFalseAlarm: c.isFalseAlarm
+        });
+        return { action: 'added' };
+      } else if (existing.id) {
+        await db.contractions.update(existing.id, {
+          endTime: c.endTime,
+          duration: c.duration,
+          interval: c.interval,
+          restDuration: c.restDuration,
+          intensity: c.intensity,
+          notes: c.notes,
+          isFalseAlarm: c.isFalseAlarm
+        });
+        return { action: 'updated' };
+      }
+      return { action: 'none' };
+    } catch (err) {
+      console.error('Failed to sync contraction into DB:', err);
+      return { action: 'none' };
+    }
+  }
+
+  /**
    * Handle incoming payloads
    */
   private async handleIncomingPayload(conn: DataConnection, payload: P2PPayload) {
@@ -433,6 +593,24 @@ class P2PSyncManager {
         break;
 
       case 'REQUEST_HISTORY':
+        // 1. If incoming request has local data from Slave (Dad), merge it into Master (Mom)
+        if (payload.historyShoppingItems) {
+          for (const si of payload.historyShoppingItems) {
+            await this.syncShoppingItemIntoDb(si);
+          }
+        }
+        if (payload.historyBagItems) {
+          for (const bi of payload.historyBagItems) {
+            await this.syncBagItemIntoDb(bi);
+          }
+        }
+        if (payload.historyContractions) {
+          for (const c of payload.historyContractions) {
+            await this.syncContractionIntoDb(c);
+          }
+        }
+
+        // 2. Fetch current master database and reply to Slave
         if (this.role === 'master') {
           const completedSessions = await db.sessions
             .where('status')
@@ -451,15 +629,19 @@ class P2PSyncManager {
             historyBagItems: bagItems,
             historyShoppingItems: shoppingItems
           });
+
+          if (payload.historyShoppingItems && payload.historyShoppingItems.length > 0) {
+            this.notifySessionReceived('Синхронізовано список покупок від тата! 🛒');
+          }
         }
         break;
 
       case 'HISTORY_RESPONSE':
-        if (this.role === 'slave') {
-          let addedCount = 0;
+        {
+          let addedSessionsCount = 0;
 
-          // 1. Sync Kick Sessions
-          if (payload.historySessions) {
+          // 1. Sync Kick Sessions (Mother to Father)
+          if (this.role === 'slave' && payload.historySessions) {
             for (const sess of payload.historySessions) {
               try {
                 const existingCount = await db.sessions
@@ -478,150 +660,62 @@ class P2PSyncManager {
                   status: 'completed',
                   note: `${sess.note ? sess.note + ' • ' : ''}Історія мами 🌸`
                 });
-                addedCount++;
+                addedSessionsCount++;
               } catch (_) {}
             }
             await deduplicateSessions();
           }
 
-          // 2. Sync Contractions
+          // 2. Sync Contractions (Two-Way)
           if (payload.historyContractions) {
             for (const c of payload.historyContractions) {
-              try {
-                const existing = await db.contractions
-                  .where('startTime')
-                  .equals(c.startTime)
-                  .first();
-                if (!existing) {
-                  await db.contractions.add({
-                    startTime: c.startTime,
-                    endTime: c.endTime,
-                    duration: c.duration,
-                    interval: c.interval,
-                    restDuration: c.restDuration,
-                    intensity: c.intensity,
-                    notes: c.notes,
-                    isFalseAlarm: c.isFalseAlarm
-                  });
-                } else if (existing.id) {
-                  await db.contractions.update(existing.id, {
-                    endTime: c.endTime,
-                    duration: c.duration,
-                    interval: c.interval,
-                    restDuration: c.restDuration,
-                    intensity: c.intensity,
-                    notes: c.notes,
-                    isFalseAlarm: c.isFalseAlarm
-                  });
-                }
-              } catch (_) {}
+              await this.syncContractionIntoDb(c);
             }
           }
 
-          // 3. Sync Hospital Bags
+          // 3. Sync Hospital Bags (Two-Way)
           if (payload.historyBagItems) {
             for (const bi of payload.historyBagItems) {
-              try {
-                const existing = await db.bagItems
-                  .where('name')
-                  .equals(bi.name)
-                  .first();
-                if (existing?.id) {
-                  await db.bagItems.update(existing.id, {
-                    isPacked: bi.isPacked,
-                    quantity: bi.quantity,
-                    notes: bi.notes
-                  });
-                }
-              } catch (_) {}
+              await this.syncBagItemIntoDb(bi);
             }
           }
 
-          // 4. Sync Shopping Wishlist
+          // 4. Sync Shopping Wishlist (Two-Way)
           if (payload.historyShoppingItems) {
             for (const si of payload.historyShoppingItems) {
-              try {
-                if (!si.title) continue;
-                const existing = await db.shoppingItems
-                  .where('title')
-                  .equals(si.title)
-                  .first();
-                if (!existing) {
-                  await db.shoppingItems.add({
-                    url: si.url || '',
-                    domain: si.domain || '',
-                    title: si.title,
-                    description: si.description || undefined,
-                    imageUrl: si.imageUrl || undefined,
-                    price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
-                    currency: si.currency || 'UAH',
-                    isBought: Boolean(si.isBought),
-                    status: si.status || (si.isBought ? 'bought' : 'planned'),
-                    orderPlace: si.orderPlace || '',
-                    depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
-                    priority: si.priority || 'medium',
-                    notes: si.notes || '',
-                    createdAt: typeof si.createdAt === 'number' && !isNaN(si.createdAt) ? si.createdAt : Date.now()
-                  });
-                } else if (existing.id) {
-                  await db.shoppingItems.update(existing.id, {
-                    isBought: Boolean(si.isBought),
-                    status: si.status || (si.isBought ? 'bought' : 'planned'),
-                    orderPlace: si.orderPlace || '',
-                    depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
-                    price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
-                    currency: si.currency || existing.currency || 'UAH',
-                    imageUrl: si.imageUrl || existing.imageUrl,
-                    notes: si.notes || existing.notes,
-                    priority: si.priority || existing.priority || 'medium'
-                  });
-                }
-              } catch (_) {}
+              await this.syncShoppingItemIntoDb(si);
             }
           }
 
-          if (this.onSessionReceivedCb && addedCount > 0) {
-            this.onSessionReceivedCb(`Синхронізовано повні дані вагітності від мами! 🌸`);
+          const partnerLabel = payload.senderRole === 'master' ? 'мами' : 'тата';
+          if (this.role === 'slave' && addedSessionsCount > 0) {
+            this.notifySessionReceived(`Синхронізовано повні дані вагітності від ${partnerLabel}! 🌸`);
+          } else if (payload.historyShoppingItems && payload.historyShoppingItems.length > 0) {
+            this.notifySessionReceived(`Синхронізовано список покупок від ${partnerLabel}! 🛍️`);
           }
         }
         break;
 
       case 'CONTRACTION_SYNC':
-        if (this.role === 'slave' && payload.contraction) {
-          try {
-            const c = payload.contraction;
-            const existing = await db.contractions.where('startTime').equals(c.startTime).first();
-            if (!existing) {
-              await db.contractions.add({
-                startTime: c.startTime,
-                endTime: c.endTime,
-                duration: c.duration,
-                interval: c.interval,
-                restDuration: c.restDuration,
-                intensity: c.intensity,
-                notes: c.notes,
-                isFalseAlarm: c.isFalseAlarm
-              });
-              if (this.onSessionReceivedCb) {
-                this.onSessionReceivedCb(`Оновлено дані переймів від мами! ⏱️`);
+        if (payload.contraction) {
+          await this.syncContractionIntoDb(payload.contraction);
+
+          // Relay to other peers if master
+          if (this.role === 'master') {
+            this.connections.forEach((c, peerId) => {
+              if (peerId !== conn.peer) {
+                this.sendPayload(c, payload);
               }
-            } else if (existing.id) {
-              await db.contractions.update(existing.id, {
-                endTime: c.endTime,
-                duration: c.duration,
-                interval: c.interval,
-                restDuration: c.restDuration,
-                intensity: c.intensity,
-                notes: c.notes,
-                isFalseAlarm: c.isFalseAlarm
-              });
-            }
-          } catch (_) {}
+            });
+          }
+
+          const senderName = payload.senderRole === 'master' ? 'мами' : 'тата';
+          this.notifySessionReceived(`⏱️ Оновлено перейми від ${senderName}!`);
         }
         break;
 
       case 'CONTRACTION_DELETED':
-        if (this.role === 'slave' && payload.deletedContractionStartTime) {
+        if (payload.deletedContractionStartTime) {
           try {
             const c = await db.contractions
               .where('startTime')
@@ -631,102 +725,107 @@ class P2PSyncManager {
               await db.contractions.delete(c.id);
             }
           } catch (_) {}
+
+          if (this.role === 'master') {
+            this.connections.forEach((c, peerId) => {
+              if (peerId !== conn.peer) {
+                this.sendPayload(c, payload);
+              }
+            });
+          }
         }
         break;
 
       case 'BAG_ITEM_SYNC':
         if (payload.bagItem) {
-          try {
-            const bi = payload.bagItem;
-            if (bi.name) {
-              const existing = await db.bagItems.where('name').equals(bi.name).first();
-              if (existing?.id) {
-                await db.bagItems.update(existing.id, {
-                  isPacked: Boolean(bi.isPacked),
-                  quantity: typeof bi.quantity === 'number' ? bi.quantity : (Number(bi.quantity) || 1),
-                  notes: bi.notes || undefined,
-                  bagId: typeof bi.bagId === 'number' ? bi.bagId : existing.bagId
-                });
-              } else {
-                const bagIdNum = typeof bi.bagId === 'number' ? bi.bagId : (Number(bi.bagId) || 1);
-                await db.bagItems.add({
-                  bagId: bagIdNum,
-                  name: bi.name,
-                  isPacked: Boolean(bi.isPacked),
-                  quantity: typeof bi.quantity === 'number' ? bi.quantity : (Number(bi.quantity) || 1),
-                  notes: bi.notes || undefined,
-                  order: typeof bi.order === 'number' ? bi.order : Date.now()
-                });
+          await this.syncBagItemIntoDb(payload.bagItem);
+
+          if (this.role === 'master') {
+            this.connections.forEach((c, peerId) => {
+              if (peerId !== conn.peer) {
+                this.sendPayload(c, payload);
               }
-            }
-          } catch (err) {
-            console.error('Failed to sync bag item:', err);
+            });
           }
+
+          const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
+          const bi = payload.bagItem;
+          const statusText = bi.isPacked ? 'зібрав(ла) ✅' : 'зняв(ла) позначку 🎒';
+          this.notifySessionReceived(`🎒 ${senderName} ${statusText} «${bi.name}»`);
         }
         break;
 
       case 'BAG_ITEM_DELETED':
         if (payload.deletedBagItemName) {
           try {
-            const existing = await db.bagItems.where('name').equals(payload.deletedBagItemName).first();
+            const existing = await db.bagItems.where('name').equalsIgnoreCase(payload.deletedBagItemName.trim()).first();
             if (existing?.id) {
               await db.bagItems.delete(existing.id);
             }
           } catch (_) {}
+
+          if (this.role === 'master') {
+            this.connections.forEach((c, peerId) => {
+              if (peerId !== conn.peer) {
+                this.sendPayload(c, payload);
+              }
+            });
+          }
+
+          const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
+          this.notifySessionReceived(`🗑️ ${senderName} видалив(ла) «${payload.deletedBagItemName}» із сумок`);
         }
         break;
 
       case 'SHOPPING_ITEM_SYNC':
         if (payload.shoppingItem) {
-          try {
-            const si = payload.shoppingItem;
-            if (si.title) {
-              const existing = await db.shoppingItems.where('title').equals(si.title).first();
-              if (existing?.id) {
-                await db.shoppingItems.update(existing.id, {
-                  isBought: Boolean(si.isBought),
-                  status: si.status || (si.isBought ? 'bought' : 'planned'),
-                  orderPlace: si.orderPlace || '',
-                  depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
-                  price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
-                  currency: si.currency || existing.currency || 'UAH',
-                  imageUrl: si.imageUrl || existing.imageUrl,
-                  notes: si.notes || '',
-                  priority: si.priority || existing.priority || 'medium'
-                });
-              } else {
-                await db.shoppingItems.add({
-                  url: si.url || '',
-                  domain: si.domain || '',
-                  title: si.title,
-                  description: si.description || undefined,
-                  imageUrl: si.imageUrl || undefined,
-                  price: typeof si.price === 'number' && !isNaN(si.price) ? si.price : undefined,
-                  currency: si.currency || 'UAH',
-                  isBought: Boolean(si.isBought),
-                  status: si.status || (si.isBought ? 'bought' : 'planned'),
-                  orderPlace: si.orderPlace || '',
-                  depositAmount: typeof si.depositAmount === 'number' && !isNaN(si.depositAmount) ? si.depositAmount : undefined,
-                  priority: si.priority || 'medium',
-                  notes: si.notes || '',
-                  createdAt: typeof si.createdAt === 'number' && !isNaN(si.createdAt) ? si.createdAt : Date.now()
-                });
+          const res = await this.syncShoppingItemIntoDb(payload.shoppingItem);
+
+          // Relay to other peers if master
+          if (this.role === 'master') {
+            this.connections.forEach((c, peerId) => {
+              if (peerId !== conn.peer) {
+                this.sendPayload(c, payload);
               }
-            }
-          } catch (err) {
-            console.error('Failed to sync shopping item:', err);
+            });
           }
+
+          const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
+          const si = payload.shoppingItem;
+          let statusDesc = '';
+          if (si.status === 'bought' || si.isBought) {
+            statusDesc = ' (Куплено 🎉)';
+          } else if (si.status === 'ordered') {
+            statusDesc = ' (Замовлено 🚚)';
+          } else if (si.status === 'planned') {
+            statusDesc = ' (У планах 📝)';
+          }
+
+          const actionVerb = res.action === 'added' ? 'додав(ла)' : 'оновив(ла)';
+          this.notifySessionReceived(`🛍️ ${senderName} ${actionVerb} «${si.title}»${statusDesc}`);
         }
         break;
 
       case 'SHOPPING_ITEM_DELETED':
         if (payload.deletedShoppingItemTitle) {
           try {
-            const existing = await db.shoppingItems.where('title').equals(payload.deletedShoppingItemTitle).first();
+            const cleanTitle = payload.deletedShoppingItemTitle.trim();
+            const existing = await db.shoppingItems.where('title').equalsIgnoreCase(cleanTitle).first();
             if (existing?.id) {
               await db.shoppingItems.delete(existing.id);
             }
           } catch (_) {}
+
+          if (this.role === 'master') {
+            this.connections.forEach((c, peerId) => {
+              if (peerId !== conn.peer) {
+                this.sendPayload(c, payload);
+              }
+            });
+          }
+
+          const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
+          this.notifySessionReceived(`🗑️ ${senderName} видалив(ла) «${payload.deletedShoppingItemTitle}»`);
         }
         break;
 
@@ -891,16 +990,38 @@ class P2PSyncManager {
   }
 
   /**
-   * Request manual sync from Slave side
+   * Request manual sync from either Master or Slave side (Two-Way)
    */
-  public requestManualSync() {
-    if (this.role !== 'slave') return;
-    this.connections.forEach((conn) => {
-      this.sendPayload(conn, {
-        type: 'REQUEST_HISTORY',
-        senderRole: 'slave'
+  public async requestManualSync() {
+    const [localShopping, localBags, localContractions] = await Promise.all([
+      db.shoppingItems.toArray(),
+      db.bagItems.toArray(),
+      db.contractions.toArray()
+    ]);
+
+    if (this.role === 'slave') {
+      this.connections.forEach((conn) => {
+        this.sendPayload(conn, {
+          type: 'REQUEST_HISTORY',
+          senderRole: 'slave',
+          historyShoppingItems: localShopping,
+          historyBagItems: localBags,
+          historyContractions: localContractions
+        });
       });
-    });
+    } else if (this.role === 'master') {
+      const completedSessions = await db.sessions.where('status').equals('completed').toArray();
+      this.connections.forEach((conn) => {
+        this.sendPayload(conn, {
+          type: 'HISTORY_RESPONSE',
+          senderRole: 'master',
+          historySessions: completedSessions,
+          historyContractions: localContractions,
+          historyBagItems: localBags,
+          historyShoppingItems: localShopping
+        });
+      });
+    }
   }
 
   // Event Listeners
@@ -914,6 +1035,14 @@ class P2PSyncManager {
 
   public setOnSessionReceived(cb: (message: string) => void) {
     this.onSessionReceivedCb = cb;
+  }
+
+  public addSessionReceivedListener(cb: (message: string) => void) {
+    this.sessionReceivedListeners.add(cb);
+  }
+
+  public removeSessionReceivedListener(cb: (message: string) => void) {
+    this.sessionReceivedListeners.delete(cb);
   }
 
   private updateStatus(status: string, count: number) {

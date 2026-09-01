@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   Plus,
@@ -18,7 +18,8 @@ import {
   Truck,
   ChevronDown,
   Check,
-  Image as ImageIcon
+  Image as ImageIcon,
+  RotateCcw
 } from 'lucide-react';
 import {
   db,
@@ -72,6 +73,24 @@ export function ShoppingWishlistView() {
 
   // Dropdown status menu id for card
   const [activeStatusMenuId, setActiveStatusMenuId] = useState<number | null>(null);
+
+  // P2P Sync status
+  const [connectedCount, setConnectedCount] = useState<number>(() => p2pSyncManager.getConnectedCount());
+  const [isManualSyncing, setIsManualSyncing] = useState<boolean>(false);
+
+  useEffect(() => {
+    setConnectedCount(p2pSyncManager.getConnectedCount());
+    p2pSyncManager.setOnStatusChange((_, count) => {
+      setConnectedCount(count);
+    });
+  }, []);
+
+  const handleManualSync = async () => {
+    setIsManualSyncing(true);
+    if ('vibrate' in navigator) navigator.vibrate([20]);
+    await p2pSyncManager.requestManualSync();
+    setTimeout(() => setIsManualSyncing(false), 1000);
+  };
 
   // Financial summary
   const budgetStats = useMemo(() => {
@@ -360,6 +379,28 @@ export function ShoppingWishlistView() {
             />
           </div>
         )}
+
+        {/* TWO-WAY P2P SYNC STATUS FOOTER */}
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/20 text-xs">
+          <div className="flex items-center space-x-1.5 text-rose-100">
+            <span className={`w-2 h-2 rounded-full ${connectedCount > 0 ? 'bg-emerald-300 animate-pulse' : 'bg-white/40'}`} />
+            <span className="text-[11px] font-medium">
+              {connectedCount > 0 ? 'Синхронізація Мама ↔ Тато активна' : 'P2P офлайн (збережено локально)'}
+            </span>
+          </div>
+          {connectedCount > 0 && (
+            <button
+              type="button"
+              onClick={handleManualSync}
+              disabled={isManualSyncing}
+              className="px-2 py-0.5 rounded-lg bg-white/20 hover:bg-white/30 active:scale-95 transition text-[11px] font-bold text-white flex items-center space-x-1"
+              title="Примусово оновити покупки між мамою і татом"
+            >
+              <RotateCcw className={`w-3 h-3 ${isManualSyncing ? 'animate-spin' : ''}`} />
+              <span>{isManualSyncing ? 'Оновлення...' : 'Оновити'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* QUICK URL INPUT & SCRAPER BAR */}

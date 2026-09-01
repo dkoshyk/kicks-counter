@@ -8,11 +8,13 @@ import { ContractionTimerView } from './components/ContractionTimerView';
 import { HospitalBagsView } from './components/HospitalBagsView';
 import { ShoppingWishlistView } from './components/ShoppingWishlistView';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { p2pSyncManager } from './utils/p2pSync';
 
 export type TabType = 'session' | 'contractions' | 'bags' | 'shopping' | 'history' | 'settings';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabType>('session');
+  const [syncToastMessage, setSyncToastMessage] = useState<string | null>(null);
   const [defaultTargetKicks, setDefaultTargetKicks] = useState<number>(() => {
     const saved = localStorage.getItem('kick_counter_default_target');
     return saved ? parseInt(saved, 10) : 10;
@@ -32,6 +34,24 @@ export function App() {
     if (saved) return saved === 'dark';
     return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
+
+  // Listen to P2P sync events (e.g. items added or updated by partner)
+  useEffect(() => {
+    let timer: any = null;
+    const handleSyncMsg = (msg: string) => {
+      setSyncToastMessage(msg);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        setSyncToastMessage(null);
+      }, 3500);
+    };
+
+    p2pSyncManager.addSessionReceivedListener(handleSyncMsg);
+    return () => {
+      p2pSyncManager.removeSessionReceivedListener(handleSyncMsg);
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   // Handle dark mode class on <html>
   useEffect(() => {
@@ -101,6 +121,18 @@ export function App() {
           </div>
         </div>
       </header>
+
+      {/* FLOATING P2P SYNC TOAST NOTIFICATION */}
+      {syncToastMessage && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 max-w-sm w-[92%] pointer-events-none animate-in fade-in slide-in-from-top-3 duration-200">
+          <div className="bg-gray-900/95 dark:bg-zinc-800/95 text-white px-4 py-2.5 rounded-2xl shadow-2xl backdrop-blur-md border border-white/10 flex items-center justify-between text-xs font-semibold">
+            <span className="truncate pr-2">{syncToastMessage}</span>
+            <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider shrink-0 bg-emerald-500/20 px-2 py-0.5 rounded-md">
+              P2P ✓
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* MAIN CONTENT AREA */}
       <main className="flex-1 w-full pt-4 pb-24">
