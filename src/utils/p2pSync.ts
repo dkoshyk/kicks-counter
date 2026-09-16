@@ -6,7 +6,9 @@ import {
   type Session,
   type Kick,
   type Contraction,
+  type HospitalBag,
   type BagItem,
+  type BagDraftProposal,
   type ShoppingItem
 } from '../db';
 
@@ -30,8 +32,13 @@ export interface P2PPayload {
     | 'HISTORY_RESPONSE'
     | 'CONTRACTION_SYNC'
     | 'CONTRACTION_DELETED'
+    | 'HOSPITAL_BAG_SYNC'
+    | 'HOSPITAL_BAG_DELETED'
     | 'BAG_ITEM_SYNC'
     | 'BAG_ITEM_DELETED'
+    | 'BAG_DRAFT_PROPOSAL'
+    | 'BAG_PROPOSAL_RESOLVED'
+    | 'BAG_HISTORY_SYNC'
     | 'SHOPPING_ITEM_SYNC'
     | 'SHOPPING_ITEM_DELETED'
     | 'DISCONNECT'
@@ -45,13 +52,23 @@ export interface P2PPayload {
   };
   historySessions?: Session[];
   historyContractions?: Contraction[];
+  historyHospitalBags?: HospitalBag[];
   historyBagItems?: BagItem[];
   historyShoppingItems?: ShoppingItem[];
   deletedStartTime?: number;
   contraction?: Contraction;
   deletedContractionStartTime?: number;
+  hospitalBag?: HospitalBag;
+  deletedHospitalBagId?: number;
+  deletedHospitalBagName?: string;
   bagItem?: BagItem;
   deletedBagItemName?: string;
+  bagDraftProposal?: BagDraftProposal;
+  proposalResolution?: {
+    proposalId: number;
+    decision: 'approved' | 'rejected';
+    description?: string;
+  };
   shoppingItem?: ShoppingItem;
   deletedShoppingItemTitle?: string;
 }
@@ -295,21 +312,28 @@ class P2PSyncManager {
             this.reconnectInterval = null;
           }
 
-          // Request full history from Mom and send Dad's local wishlist & bag items
+          // Request full history from Mom and send Dad's local wishlist & contractions
           try {
-            const [localShopping, localBags, localContractions] = await Promise.all([
+            const [localShopping, localContractions, pendingProposals] = await Promise.all([
               db.shoppingItems.toArray(),
-              db.bagItems.toArray(),
-              db.contractions.toArray()
+              db.contractions.toArray(),
+              db.bagDraftProposals.where('status').equals('pending').toArray()
             ]);
 
             this.sendPayload(conn, {
               type: 'REQUEST_HISTORY',
               senderRole: 'slave',
               historyShoppingItems: localShopping,
-              historyBagItems: localBags,
               historyContractions: localContractions
             });
+
+            for (const prop of pendingProposals) {
+              this.sendPayload(conn, {
+                type: 'BAG_DRAFT_PROPOSAL',
+                senderRole: 'slave',
+                bagDraftProposal: prop
+              });
+            }
           } catch (_) {
             this.sendPayload(conn, {
               type: 'REQUEST_HISTORY',
@@ -593,24 +617,20 @@ class P2PSyncManager {
         break;
 
       case 'REQUEST_HISTORY':
-        // 1. If incoming request has local data from Slave (Dad), merge it into Master (Mom)
+        // 1. If incoming request has local data from Slave (Dad), merge wishlist & contractions
         if (payload.historyShoppingItems) {
           for (const si of payload.historyShoppingItems) {
             await this.syncShoppingItemIntoDb(si);
           }
         }
-        if (payload.historyBagItems) {
-          for (const bi of payload.historyBagItems) {
-            await this.syncBagItemIntoDb(bi);
-          }
-        }
+        // NOTE: Dad's bag items are NOT automatically merged into Mom's DB to prevent overwriting Mom's bags!
         if (payload.historyContractions) {
           for (const c of payload.historyContractions) {
             await this.syncContractionIntoDb(c);
           }
         }
 
-        // 2. Fetch current master database and reply to Slave
+        // 2. Reply with Mom's authoritative state (including Hospital Bags)
         if (this.role === 'master') {
           const completedSessions = await db.sessions
             .where('status')
@@ -618,6 +638,7 @@ class P2PSyncManager {
             .toArray();
 
           const contractions = await db.contractions.toArray();
+          const bags = await db.hospitalBags.toArray();
           const bagItems = await db.bagItems.toArray();
           const shoppingItems = await db.shoppingItems.toArray();
 
@@ -626,6 +647,7 @@ class P2PSyncManager {
             senderRole: 'master',
             historySessions: completedSessions,
             historyContractions: contractions,
+            historyHospitalBags: bags,
             historyBagItems: bagItems,
             historyShoppingItems: shoppingItems
           });
@@ -673,11 +695,20 @@ class P2PSyncManager {
             }
           }
 
-          // 3. Sync Hospital Bags (Two-Way)
-          if (payload.historyBagItems) {
-            for (const bi of payload.historyBagItems) {
-              await this.syncBagItemIntoDb(bi);
-            }
+          // 3. Sync Hospital Bags (Mom is Master: Dad receives authoritative bags & items)
+          if (this.role === 'slave' && payload.historyHospitalBags) {
+            await db.transaction('rw', [db.hospitalBags, db.bagItems], async () => {
+              await db.bagItems.clear();
+              await db.hospitalBags.clear();
+              for (const b of payload.historyHospitalBags!) {
+                await db.hospitalBags.add(b);
+              }
+              if (payload.historyBagItems) {
+                for (const bi of payload.historyBagItems) {
+                  await db.bagItems.add(bi);
+                }
+              }
+            });
           }
 
           // 4. Sync Shopping Wishlist (Two-Way)
@@ -696,84 +727,165 @@ class P2PSyncManager {
         }
         break;
 
-      case 'CONTRACTION_SYNC':
-        if (payload.contraction) {
-          await this.syncContractionIntoDb(payload.contraction);
-
-          // Relay to other peers if master
+      case 'HOSPITAL_BAG_SYNC':
+        if (payload.hospitalBag) {
+          const bag = payload.hospitalBag;
+          const existing = bag.id ? await db.hospitalBags.get(bag.id) : null;
+          if (existing?.id) {
+            await db.hospitalBags.update(existing.id, bag);
+          } else {
+            await db.hospitalBags.add(bag);
+          }
           if (this.role === 'master') {
             this.connections.forEach((c, peerId) => {
-              if (peerId !== conn.peer) {
-                this.sendPayload(c, payload);
-              }
+              if (peerId !== conn.peer) this.sendPayload(c, payload);
             });
           }
-
-          const senderName = payload.senderRole === 'master' ? 'мами' : 'тата';
-          this.notifySessionReceived(`⏱️ Оновлено перейми від ${senderName}!`);
+          this.notifySessionReceived(`🎒 Оновлено сумку «${bag.name}»`);
         }
         break;
 
-      case 'CONTRACTION_DELETED':
-        if (payload.deletedContractionStartTime) {
-          try {
-            const c = await db.contractions
-              .where('startTime')
-              .equals(payload.deletedContractionStartTime)
-              .first();
-            if (c?.id) {
-              await db.contractions.delete(c.id);
-            }
-          } catch (_) {}
-
+      case 'HOSPITAL_BAG_DELETED':
+        if (payload.deletedHospitalBagId || payload.deletedHospitalBagName) {
+          let toDeleteId = payload.deletedHospitalBagId;
+          if (!toDeleteId && payload.deletedHospitalBagName) {
+            const bag = await db.hospitalBags.where('name').equalsIgnoreCase(payload.deletedHospitalBagName).first();
+            toDeleteId = bag?.id;
+          }
+          if (toDeleteId) {
+            await db.bagItems.where('bagId').equals(toDeleteId).delete();
+            await db.hospitalBags.delete(toDeleteId);
+          }
           if (this.role === 'master') {
             this.connections.forEach((c, peerId) => {
-              if (peerId !== conn.peer) {
-                this.sendPayload(c, payload);
-              }
+              if (peerId !== conn.peer) this.sendPayload(c, payload);
             });
           }
+          this.notifySessionReceived(`🗑️ Видалено сумку «${payload.deletedHospitalBagName || ''}»`);
+        }
+        break;
+
+      case 'BAG_DRAFT_PROPOSAL':
+        if (this.role === 'master' && payload.bagDraftProposal) {
+          const prop = payload.bagDraftProposal;
+          const existing = await db.bagDraftProposals
+            .where('timestamp')
+            .equals(prop.timestamp)
+            .first();
+
+          if (!existing) {
+            await db.bagDraftProposals.add({
+              timestamp: prop.timestamp,
+              author: 'dad',
+              action: prop.action,
+              description: prop.description,
+              targetId: prop.targetId,
+              bagId: prop.bagId,
+              bagName: prop.bagName,
+              itemName: prop.itemName,
+              data: prop.data,
+              status: 'pending'
+            });
+            this.notifySessionReceived(`📝 Нова пропозиція від тата: «${prop.description}»`);
+          }
+        }
+        break;
+
+      case 'BAG_PROPOSAL_RESOLVED':
+        if (this.role === 'slave' && payload.proposalResolution) {
+          const { proposalId, decision, description } = payload.proposalResolution;
+          const local = await db.bagDraftProposals.get(proposalId);
+          if (local) {
+            await db.bagDraftProposals.update(proposalId, {
+              status: decision,
+              resolvedAt: Date.now()
+            });
+          }
+          const symbol = decision === 'approved' ? '✅' : '❌';
+          const verb = decision === 'approved' ? 'затвердила' : 'відхилила';
+          this.notifySessionReceived(`${symbol} Мама ${verb}: «${description || 'пропозицію'}»`);
+        }
+        break;
+
+      case 'BAG_HISTORY_SYNC':
+        if (this.role === 'slave' && payload.historyHospitalBags) {
+          await db.transaction('rw', [db.hospitalBags, db.bagItems], async () => {
+            await db.bagItems.clear();
+            await db.hospitalBags.clear();
+            for (const b of payload.historyHospitalBags!) {
+              await db.hospitalBags.add(b);
+            }
+            if (payload.historyBagItems) {
+              for (const it of payload.historyBagItems!) {
+                await db.bagItems.add(it);
+              }
+            }
+          });
+          this.notifySessionReceived('🎒 Стан сумок оновлено від мами');
         }
         break;
 
       case 'BAG_ITEM_SYNC':
         if (payload.bagItem) {
-          await this.syncBagItemIntoDb(payload.bagItem);
-
-          if (this.role === 'master') {
-            this.connections.forEach((c, peerId) => {
-              if (peerId !== conn.peer) {
-                this.sendPayload(c, payload);
-              }
+          if (this.role === 'master' && payload.senderRole === 'slave') {
+            // Treat as draft proposal rather than overwriting Mom's database directly
+            const bi = payload.bagItem;
+            const statusText = bi.isPacked ? 'позначити зібраним' : 'зняти позначку';
+            await db.bagDraftProposals.add({
+              timestamp: Date.now(),
+              author: 'dad',
+              action: 'edit_item',
+              description: `Тато пропонує ${statusText} «${bi.name}»`,
+              itemName: bi.name,
+              bagId: bi.bagId,
+              data: bi,
+              status: 'pending'
             });
+            this.notifySessionReceived(`📝 Тато пропонує змінити «${bi.name}»`);
+          } else {
+            await this.syncBagItemIntoDb(payload.bagItem);
+            if (this.role === 'master') {
+              this.connections.forEach((c, peerId) => {
+                if (peerId !== conn.peer) this.sendPayload(c, payload);
+              });
+            }
+            const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
+            const bi = payload.bagItem;
+            const statusText = bi.isPacked ? 'зібрав(ла) ✅' : 'зняв(ла) позначку 🎒';
+            this.notifySessionReceived(`🎒 ${senderName} ${statusText} «${bi.name}»`);
           }
-
-          const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
-          const bi = payload.bagItem;
-          const statusText = bi.isPacked ? 'зібрав(ла) ✅' : 'зняв(ла) позначку 🎒';
-          this.notifySessionReceived(`🎒 ${senderName} ${statusText} «${bi.name}»`);
         }
         break;
 
       case 'BAG_ITEM_DELETED':
         if (payload.deletedBagItemName) {
-          try {
-            const existing = await db.bagItems.where('name').equalsIgnoreCase(payload.deletedBagItemName.trim()).first();
-            if (existing?.id) {
-              await db.bagItems.delete(existing.id);
-            }
-          } catch (_) {}
-
-          if (this.role === 'master') {
-            this.connections.forEach((c, peerId) => {
-              if (peerId !== conn.peer) {
-                this.sendPayload(c, payload);
-              }
+          if (this.role === 'master' && payload.senderRole === 'slave') {
+            await db.bagDraftProposals.add({
+              timestamp: Date.now(),
+              author: 'dad',
+              action: 'delete_item',
+              description: `Тато пропонує видалити «${payload.deletedBagItemName}»`,
+              itemName: payload.deletedBagItemName,
+              status: 'pending'
             });
-          }
+            this.notifySessionReceived(`📝 Тато пропонує видалити «${payload.deletedBagItemName}»`);
+          } else {
+            try {
+              const existing = await db.bagItems.where('name').equalsIgnoreCase(payload.deletedBagItemName.trim()).first();
+              if (existing?.id) {
+                await db.bagItems.delete(existing.id);
+              }
+            } catch (_) {}
 
-          const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
-          this.notifySessionReceived(`🗑️ ${senderName} видалив(ла) «${payload.deletedBagItemName}» із сумок`);
+            if (this.role === 'master') {
+              this.connections.forEach((c, peerId) => {
+                if (peerId !== conn.peer) this.sendPayload(c, payload);
+              });
+            }
+
+            const senderName = payload.senderRole === 'master' ? 'Мама' : 'Тато';
+            this.notifySessionReceived(`🗑️ ${senderName} видалив(ла) «${payload.deletedBagItemName}» із сумок`);
+          }
         }
         break;
 
@@ -920,6 +1032,67 @@ class P2PSyncManager {
   }
 
   /**
+   * Broadcast hospital bag added or edited
+   */
+  public broadcastHospitalBag(hospitalBag: HospitalBag) {
+    this.broadcast({
+      type: 'HOSPITAL_BAG_SYNC',
+      senderRole: this.role,
+      hospitalBag
+    });
+  }
+
+  /**
+   * Broadcast deleted hospital bag
+   */
+  public broadcastDeletedHospitalBag(bagId: number, bagName: string) {
+    this.broadcast({
+      type: 'HOSPITAL_BAG_DELETED',
+      senderRole: this.role,
+      deletedHospitalBagId: bagId,
+      deletedHospitalBagName: bagName
+    });
+  }
+
+  /**
+   * Send Dad's draft proposal to Mom
+   */
+  public broadcastBagDraftProposal(bagDraftProposal: BagDraftProposal) {
+    this.broadcast({
+      type: 'BAG_DRAFT_PROPOSAL',
+      senderRole: this.role,
+      bagDraftProposal
+    });
+  }
+
+  /**
+   * Broadcast Mom's approval or rejection of Dad's proposal
+   */
+  public broadcastProposalResolved(proposalId: number, decision: 'approved' | 'rejected', description?: string) {
+    this.broadcast({
+      type: 'BAG_PROPOSAL_RESOLVED',
+      senderRole: this.role,
+      proposalResolution: {
+        proposalId,
+        decision,
+        description
+      }
+    });
+  }
+
+  /**
+   * Broadcast full bags & items state (e.g. after rollback or approval)
+   */
+  public broadcastFullBagsSync(historyHospitalBags: HospitalBag[], historyBagItems: BagItem[]) {
+    this.broadcast({
+      type: 'BAG_HISTORY_SYNC',
+      senderRole: this.role,
+      historyHospitalBags,
+      historyBagItems
+    });
+  }
+
+  /**
    * Broadcast shopping item change (bought, added, edited)
    */
   public broadcastShoppingItem(shoppingItem: ShoppingItem) {
@@ -993,32 +1166,47 @@ class P2PSyncManager {
    * Request manual sync from either Master or Slave side (Two-Way)
    */
   public async requestManualSync() {
-    const [localShopping, localBags, localContractions] = await Promise.all([
-      db.shoppingItems.toArray(),
-      db.bagItems.toArray(),
-      db.contractions.toArray()
-    ]);
-
     if (this.role === 'slave') {
+      const [localShopping, localContractions, pendingProposals] = await Promise.all([
+        db.shoppingItems.toArray(),
+        db.contractions.toArray(),
+        db.bagDraftProposals.where('status').equals('pending').toArray()
+      ]);
+
       this.connections.forEach((conn) => {
         this.sendPayload(conn, {
           type: 'REQUEST_HISTORY',
           senderRole: 'slave',
           historyShoppingItems: localShopping,
-          historyBagItems: localBags,
           historyContractions: localContractions
         });
+
+        for (const prop of pendingProposals) {
+          this.sendPayload(conn, {
+            type: 'BAG_DRAFT_PROPOSAL',
+            senderRole: 'slave',
+            bagDraftProposal: prop
+          });
+        }
       });
     } else if (this.role === 'master') {
-      const completedSessions = await db.sessions.where('status').equals('completed').toArray();
+      const [completedSessions, allBags, allBagItems, contractions, shoppingItems] = await Promise.all([
+        db.sessions.where('status').equals('completed').toArray(),
+        db.hospitalBags.toArray(),
+        db.bagItems.toArray(),
+        db.contractions.toArray(),
+        db.shoppingItems.toArray()
+      ]);
+
       this.connections.forEach((conn) => {
         this.sendPayload(conn, {
           type: 'HISTORY_RESPONSE',
           senderRole: 'master',
           historySessions: completedSessions,
-          historyContractions: localContractions,
-          historyBagItems: localBags,
-          historyShoppingItems: localShopping
+          historyContractions: contractions,
+          historyHospitalBags: allBags,
+          historyBagItems: allBagItems,
+          historyShoppingItems: shoppingItems
         });
       });
     }

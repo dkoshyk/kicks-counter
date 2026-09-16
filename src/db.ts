@@ -31,11 +31,12 @@ export interface Contraction {
 export interface HospitalBag {
   id?: number;
   name: string;        // 'Сумка на пологи (в родзал) — M', 'Післяпологова для мами — L', 'Післяпологова для малюка — S'
-  code: string;        // 'labor', 'mom', 'baby'
-  size: 'M' | 'L' | 'S';
-  icon: string;
-  color: string;
+  code: string;        // 'labor', 'mom', 'baby' or unique slug
+  size: string;        // 'M', 'L', 'S', 'XL', etc.
+  icon: string;        // Lucide icon name
+  color: string;       // Tailwind gradient classes
   order: number;
+  isDraft?: boolean;
 }
 
 export interface BagItem {
@@ -48,6 +49,35 @@ export interface BagItem {
   notes?: string;
   shoppingUrl?: string;
   order: number;
+  isDraft?: boolean;
+  draftProposalId?: number;
+}
+
+export interface BagDraftProposal {
+  id?: number;
+  timestamp: number;
+  author: 'dad' | 'mom';
+  action: 'add_item' | 'edit_item' | 'delete_item' | 'toggle_packed' | 'add_bag' | 'edit_bag' | 'delete_bag';
+  description: string;
+  targetId?: number;   // Item or bag ID
+  bagId?: number;      // Parent bag ID
+  bagName?: string;
+  itemName?: string;
+  data?: any;          // Payload changes or item object
+  status: 'pending' | 'approved' | 'rejected';
+  resolvedAt?: number;
+}
+
+export interface BagChangeHistory {
+  id?: number;
+  timestamp: number;
+  author: 'mom' | 'dad';
+  action: string;
+  description: string;
+  snapshot: {
+    bags: HospitalBag[];
+    items: BagItem[];
+  };
 }
 
 export interface ShoppingItem {
@@ -80,6 +110,8 @@ export interface BackupData {
   hospitalBags?: HospitalBag[];
   bagItems?: BagItem[];
   shoppingItems?: ShoppingItem[];
+  bagDraftProposals?: BagDraftProposal[];
+  bagChangeHistory?: BagChangeHistory[];
 }
 
 export class KickCounterDB extends Dexie {
@@ -89,6 +121,8 @@ export class KickCounterDB extends Dexie {
   hospitalBags!: Table<HospitalBag>;
   bagItems!: Table<BagItem>;
   shoppingItems!: Table<ShoppingItem>;
+  bagDraftProposals!: Table<BagDraftProposal>;
+  bagChangeHistory!: Table<BagChangeHistory>;
 
   constructor() {
     super('KickCounterDB');
@@ -104,6 +138,17 @@ export class KickCounterDB extends Dexie {
       hospitalBags: '++id, name, code, size, order',
       bagItems: '++id, bagId, name, isPacked, order',
       shoppingItems: '++id, url, domain, title, isBought, priority, createdAt'
+    });
+
+    this.version(3).stores({
+      sessions: '++id, startTime, endTime, kickCount, targetKicks, status, note',
+      kicks: '++id, sessionId, timestamp',
+      contractions: '++id, startTime, endTime, duration, interval, intensity',
+      hospitalBags: '++id, name, code, size, order',
+      bagItems: '++id, bagId, name, isPacked, order',
+      shoppingItems: '++id, url, domain, title, isBought, priority, createdAt',
+      bagDraftProposals: '++id, timestamp, author, status, action',
+      bagChangeHistory: '++id, timestamp, author'
     });
   }
 }
@@ -365,9 +410,11 @@ export async function exportBackupJSON(): Promise<string> {
   const hospitalBags = await db.hospitalBags.toArray();
   const bagItems = await db.bagItems.toArray();
   const shoppingItems = await db.shoppingItems.toArray();
+  const bagDraftProposals = await db.bagDraftProposals.toArray();
+  const bagChangeHistory = await db.bagChangeHistory.toArray();
 
   const backup: BackupData = {
-    version: 2,
+    version: 3,
     appName: 'Поштовхи',
     exportedAt: new Date().toISOString(),
     sessions,
@@ -375,7 +422,9 @@ export async function exportBackupJSON(): Promise<string> {
     contractions,
     hospitalBags,
     bagItems,
-    shoppingItems
+    shoppingItems,
+    bagDraftProposals,
+    bagChangeHistory
   };
 
   return JSON.stringify(backup, null, 2);
@@ -396,7 +445,16 @@ export async function importBackupJSON(
 
   return await db.transaction(
     'rw',
-    [db.sessions, db.kicks, db.contractions, db.hospitalBags, db.bagItems, db.shoppingItems],
+    [
+      db.sessions,
+      db.kicks,
+      db.contractions,
+      db.hospitalBags,
+      db.bagItems,
+      db.shoppingItems,
+      db.bagDraftProposals,
+      db.bagChangeHistory
+    ],
     async () => {
       if (mode === 'replace') {
         await db.sessions.clear();
@@ -405,6 +463,8 @@ export async function importBackupJSON(
         if (data.hospitalBags) await db.hospitalBags.clear();
         if (data.bagItems) await db.bagItems.clear();
         if (data.shoppingItems) await db.shoppingItems.clear();
+        if (data.bagDraftProposals) await db.bagDraftProposals.clear();
+        if (data.bagChangeHistory) await db.bagChangeHistory.clear();
       }
 
       let importedSessions = 0;
@@ -463,6 +523,22 @@ export async function importBackupJSON(
         for (const s of data.shoppingItems) {
           const { id: _, ...sData } = s;
           await db.shoppingItems.add(sData as ShoppingItem);
+        }
+      }
+
+      // Import draft proposals
+      if (data.bagDraftProposals && Array.isArray(data.bagDraftProposals)) {
+        for (const p of data.bagDraftProposals) {
+          const { id: _, ...pData } = p;
+          await db.bagDraftProposals.add(pData as BagDraftProposal);
+        }
+      }
+
+      // Import bag change history
+      if (data.bagChangeHistory && Array.isArray(data.bagChangeHistory)) {
+        for (const h of data.bagChangeHistory) {
+          const { id: _, ...hData } = h;
+          await db.bagChangeHistory.add(hData as BagChangeHistory);
         }
       }
 
@@ -691,36 +767,15 @@ export const DEFAULT_BAGS: Array<{
 ];
 
 /**
- * Populates initial default hospital bags if empty or deduplicates them
+ * Populates initial default hospital bags if database has no bags yet.
+ * Never modifies or deletes existing bags or items.
  */
 export async function seedDefaultBags(): Promise<void> {
   await db.transaction('rw', db.hospitalBags, db.bagItems, async () => {
-    const existingBags = await db.hospitalBags.toArray();
-
-    // If there are duplicate bags with identical codes, keep only the first one and reassign or clean items
-    if (existingBags.length > 3) {
-      const seenCodes = new Set<string>();
-      const bagsToKeep: HospitalBag[] = [];
-      const bagsToDeleteIds: number[] = [];
-
-      for (const b of existingBags) {
-        if (!b.id) continue;
-        if (seenCodes.has(b.code)) {
-          bagsToDeleteIds.push(b.id);
-        } else {
-          seenCodes.add(b.code);
-          bagsToKeep.push(b);
-        }
-      }
-
-      for (const delId of bagsToDeleteIds) {
-        await db.bagItems.where('bagId').equals(delId).delete();
-        await db.hospitalBags.delete(delId);
-      }
+    const count = await db.hospitalBags.count();
+    if (count > 0) {
       return;
     }
-
-    if (existingBags.length > 0) return;
 
     for (const bag of DEFAULT_BAGS) {
       const { items, ...bagData } = bag;
@@ -743,10 +798,12 @@ export async function seedDefaultBags(): Promise<void> {
 }
 
 /**
- * Resets hospital bags to standard template
+ * Resets hospital bags to standard template and logs history
  */
 export async function resetBagsToDefault(): Promise<void> {
-  await db.transaction('rw', db.hospitalBags, db.bagItems, async () => {
+  await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    await recordBagHistoryInternal('Скидання сумок до стандартного шаблону', 'mom');
+
     await db.bagItems.clear();
     await db.hospitalBags.clear();
     for (const bag of DEFAULT_BAGS) {
@@ -769,25 +826,251 @@ export async function resetBagsToDefault(): Promise<void> {
   });
 }
 
-export async function toggleBagItemPacked(itemId: number): Promise<boolean> {
+// -------------------------------------------------------------
+// BAG MANAGEMENT (CRUD, UNDO, REVERT & PROPOSALS)
+// -------------------------------------------------------------
+
+/**
+ * Adds a new custom hospital bag
+ */
+export async function addHospitalBag(bag: Omit<HospitalBag, 'id'>, author: 'mom' | 'dad' = 'mom'): Promise<number> {
+  return await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    const id = (await db.hospitalBags.add(bag)) as number;
+    await recordBagHistoryInternal(`Додано сумку «${bag.name}»`, author);
+    return id;
+  });
+}
+
+/**
+ * Updates an existing hospital bag (name, size, icon, color, etc.)
+ */
+export async function updateHospitalBag(id: number, changes: Partial<HospitalBag>, author: 'mom' | 'dad' = 'mom'): Promise<void> {
+  await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    const current = await db.hospitalBags.get(id);
+    await db.hospitalBags.update(id, changes);
+    const bagName = changes.name || current?.name || 'Сумка';
+    await recordBagHistoryInternal(`Оновлено сумку «${bagName}»`, author);
+  });
+}
+
+/**
+ * Deletes a hospital bag and all its items, capturing snapshot for instant Undo
+ */
+export async function deleteHospitalBag(id: number, author: 'mom' | 'dad' = 'mom'): Promise<{ bag: HospitalBag; items: BagItem[] } | null> {
+  return await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    const bag = await db.hospitalBags.get(id);
+    if (!bag) return null;
+
+    const items = await db.bagItems.where('bagId').equals(id).toArray();
+
+    // Record snapshot before deletion
+    await recordBagHistoryInternal(`Видалено сумку «${bag.name}» (${items.length} речей)`, author);
+
+    await db.bagItems.where('bagId').equals(id).delete();
+    await db.hospitalBags.delete(id);
+
+    return { bag, items };
+  });
+}
+
+/**
+ * Restores a previously deleted hospital bag and its items (Undo action)
+ */
+export async function restoreHospitalBag(
+  bag: HospitalBag,
+  items: BagItem[],
+  author: 'mom' | 'dad' = 'mom'
+): Promise<number> {
+  return await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    const { id: _, ...bagData } = bag;
+    const newBagId = (await db.hospitalBags.add(bagData as HospitalBag)) as number;
+
+    for (const item of items) {
+      const { id: __, bagId: ___, ...itemData } = item;
+      await db.bagItems.add({
+        ...itemData,
+        bagId: newBagId
+      });
+    }
+
+    await recordBagHistoryInternal(`Відновлено сумку «${bag.name}» (${items.length} речей)`, author);
+    return newBagId;
+  });
+}
+
+/**
+ * Internal snapshot helper for recording change history
+ */
+async function recordBagHistoryInternal(description: string, author: 'mom' | 'dad' = 'mom'): Promise<void> {
+  const bags = await db.hospitalBags.toArray();
+  const items = await db.bagItems.toArray();
+
+  await db.bagChangeHistory.add({
+    timestamp: Date.now(),
+    author,
+    action: description,
+    description,
+    snapshot: { bags, items }
+  });
+
+  // Keep last 40 history entries
+  const count = await db.bagChangeHistory.count();
+  if (count > 40) {
+    const oldest = await db.bagChangeHistory.orderBy('timestamp').limit(count - 40).toArray();
+    for (const entry of oldest) {
+      if (entry.id) await db.bagChangeHistory.delete(entry.id);
+    }
+  }
+}
+
+/**
+ * Public helper to record manual history event
+ */
+export async function recordBagHistory(description: string, author: 'mom' | 'dad' = 'mom'): Promise<void> {
+  await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    await recordBagHistoryInternal(description, author);
+  });
+}
+
+/**
+ * Reverts bags & items state to a specific history snapshot
+ */
+export async function revertToBagHistory(historyId: number): Promise<void> {
+  await db.transaction('rw', [db.hospitalBags, db.bagItems, db.bagChangeHistory], async () => {
+    const entry = await db.bagChangeHistory.get(historyId);
+    if (!entry || !entry.snapshot) throw new Error('Збережену версію не знайдено');
+
+    // Create a safety snapshot of current state before reverting
+    const currentBags = await db.hospitalBags.toArray();
+    const currentItems = await db.bagItems.toArray();
+    const dateFormatted = new Date(entry.timestamp).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+
+    await db.bagChangeHistory.add({
+      timestamp: Date.now(),
+      author: 'mom',
+      action: 'auto_backup_before_revert',
+      description: `Автозбереження перед поверненням до версії від ${dateFormatted}`,
+      snapshot: { bags: currentBags, items: currentItems }
+    });
+
+    // Revert to snapshot
+    await db.bagItems.clear();
+    await db.hospitalBags.clear();
+
+    for (const b of entry.snapshot.bags) {
+      await db.hospitalBags.add(b);
+    }
+    for (const it of entry.snapshot.items) {
+      await db.bagItems.add(it);
+    }
+  });
+}
+
+/**
+ * Adds a new draft proposal (e.g. proposed by Dad)
+ */
+export async function addBagDraftProposal(
+  proposal: Omit<BagDraftProposal, 'id' | 'timestamp' | 'status'>
+): Promise<number> {
+  const id = await db.bagDraftProposals.add({
+    ...proposal,
+    timestamp: Date.now(),
+    status: 'pending'
+  });
+  return id as number;
+}
+
+/**
+ * Approves or rejects a draft proposal
+ */
+export async function resolveBagDraftProposal(
+  id: number,
+  decision: 'approved' | 'rejected'
+): Promise<{ proposal: BagDraftProposal | null; applied: boolean }> {
+  return await db.transaction(
+    'rw',
+    [db.hospitalBags, db.bagItems, db.bagDraftProposals, db.bagChangeHistory],
+    async () => {
+      const proposal = await db.bagDraftProposals.get(id);
+      if (!proposal) return { proposal: null, applied: false };
+
+      if (decision === 'approved') {
+        if (proposal.action === 'toggle_packed' && proposal.targetId) {
+          const item = await db.bagItems.get(proposal.targetId);
+          if (item) {
+            await db.bagItems.update(item.id!, { isPacked: !item.isPacked });
+          }
+        } else if (proposal.action === 'add_item' && proposal.data) {
+          await db.bagItems.add(proposal.data);
+        } else if (proposal.action === 'edit_item' && proposal.targetId && proposal.data) {
+          await db.bagItems.update(proposal.targetId, proposal.data);
+        } else if (proposal.action === 'delete_item' && proposal.targetId) {
+          await db.bagItems.delete(proposal.targetId);
+        } else if (proposal.action === 'add_bag' && proposal.data) {
+          await db.hospitalBags.add(proposal.data);
+        } else if (proposal.action === 'edit_bag' && proposal.targetId && proposal.data) {
+          await db.hospitalBags.update(proposal.targetId, proposal.data);
+        } else if (proposal.action === 'delete_bag' && proposal.targetId) {
+          await db.bagItems.where('bagId').equals(proposal.targetId).delete();
+          await db.hospitalBags.delete(proposal.targetId);
+        }
+
+        await recordBagHistoryInternal(`Затверджено пропозицію від тата: ${proposal.description}`, 'dad');
+      }
+
+      await db.bagDraftProposals.update(id, {
+        status: decision,
+        resolvedAt: Date.now()
+      });
+
+      return { proposal, applied: decision === 'approved' };
+    }
+  );
+}
+
+/**
+ * Deletes or discards a specific draft proposal (e.g. Dad cancelling his draft)
+ */
+export async function deleteBagDraftProposal(id: number): Promise<void> {
+  await db.bagDraftProposals.delete(id);
+}
+
+/**
+ * Clears all resolved draft proposals
+ */
+export async function clearResolvedProposals(): Promise<void> {
+  await db.bagDraftProposals.where('status').anyOf(['approved', 'rejected']).delete();
+}
+
+export async function toggleBagItemPacked(itemId: number, author: 'mom' | 'dad' = 'mom'): Promise<boolean> {
   const item = await db.bagItems.get(itemId);
   if (!item) return false;
   const next = !item.isPacked;
   await db.bagItems.update(itemId, { isPacked: next });
+  const statusStr = next ? 'зібрано' : 'не зібрано';
+  await recordBagHistoryInternal(`Позначено «${item.name}» як ${statusStr}`, author);
   return next;
 }
 
-export async function addBagItem(item: Omit<BagItem, 'id'>): Promise<number> {
-  const id = await db.bagItems.add(item);
-  return id as number;
+export async function addBagItem(item: Omit<BagItem, 'id'>, author: 'mom' | 'dad' = 'mom'): Promise<number> {
+  const id = (await db.bagItems.add(item)) as number;
+  await recordBagHistoryInternal(`Додано річ «${item.name}»`, author);
+  return id;
 }
 
-export async function updateBagItem(id: number, changes: Partial<BagItem>): Promise<void> {
+export async function updateBagItem(id: number, changes: Partial<BagItem>, author: 'mom' | 'dad' = 'mom'): Promise<void> {
   await db.bagItems.update(id, changes);
+  const current = await db.bagItems.get(id);
+  const itemName = current?.name || 'Річ';
+  await recordBagHistoryInternal(`Оновлено річ «${itemName}»`, author);
 }
 
-export async function deleteBagItem(id: number): Promise<void> {
+export async function deleteBagItem(id: number, author: 'mom' | 'dad' = 'mom'): Promise<BagItem | null> {
+  const item = await db.bagItems.get(id);
+  if (!item) return null;
   await db.bagItems.delete(id);
+  await recordBagHistoryInternal(`Видалено річ «${item.name}»`, author);
+  return item;
 }
 
 // ==========================================
